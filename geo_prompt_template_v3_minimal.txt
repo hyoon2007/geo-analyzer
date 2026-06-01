@@ -1,0 +1,6 @@
+Analyze this HTML for GEO optimization. Output only JSON:
+
+{{CLEAN_HTML_CONTENT}}
+
+Respond with JSON:
+{"structural_audit":{"status":"passed|needs_improvement","recommendations":[{"selector":"","action":"change_tag_to_h1|h2|h3|article|section|update_text","new_text":"","reason":""}]},"enriched_meta":{"title":"","description":""},"json_ld":{"@context":"https://schema.org","@type":"","name":"","description":""}}

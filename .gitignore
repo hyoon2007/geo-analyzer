@@ -1,0 +1,32 @@
+# Python cache and virtual environments
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.venv/
+venv/
+
+# macOS
+.DS_Store
+
+# Local secrets and machine-specific config
+config.properties
+.env
+.env.*
+
+# Backup and temporary files
+*.bak
+*.tmp
+*.swp
+
+# Generated local artifacts (from scripts/tests)
+result*.html
+final_prompt_result*.txt
+gpt-recommand*.json
+
+# Local logs and reports
+logs/
+*.log
+
+# VS Code local history/settings
+.vscode/

@@ -1,0 +1,42 @@
+# Object Storage
+object_storage.bucket_name=your-bucket-name
+object_storage.endpoint=https://your-object-storage-endpoint
+object_storage.public_base_url=https://your-public-base-url
+object_storage.region=your-region
+object_storage.prefix=rendered-html
+object_storage.access_key=your-access-key
+object_storage.secret_key=your-secret-key
+
+# Preprocessor
+preprocessor.base_url=https://your-preprocessor-base-url
+preprocessor.path=/geo/recommend?mode=aggressive&url=
+
+# LLM
+# llm.api_url=http://your-llm-host/v1/chat/completions
+# llm.model=gemma-4-fp4
+llm.api_url=http://your-llm-host/v1/chat/completions
+llm.model=Qwen/Qwen2.5-72B-Instruct-AWQ
+llm.temperature=0
+llm.max_preprocessor_chars=120000
+llm.input_overflow_policy=error
+# llm.input_overflow_policy=truncate
+llm.retry_max_tokens=[1000,500,300]
+llm.timeout_seconds=900
+
+# Prompt
+prompt.file=geo_prompt_template_v1_original.txt
+
+# Local output
+output.save_enabled=true
+output.base_dir=/absolute/path/to/geo-log
+output.rendered_html_subdir=rendered_html
+output.preprocessor_subdir=pre_response
+output.llm_prompt_subdir=llm_prompt
+output.llm_subdir=llm_response
+output.injection_report_subdir=injection_report
+
+# Debug mode
+debug.enabled=true
+
+# Playwright
+playwright.goto_timeout_ms=60000
