@@ -3,8 +3,9 @@ import argparse
 import hashlib
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 from urllib.parse import quote, urlparse
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -110,6 +111,14 @@ LLM_RESULT_DIR = OUTPUT_BASE_DIR / require_property(
     PROPERTIES,
     'output.llm_subdir',
 )
+LLM_RAW_RESPONSE_DIR = OUTPUT_BASE_DIR / PROPERTIES.get(
+    'output.llm_raw_response_subdir',
+    'llm_raw_response',
+)
+LLM_REPAIR_DIR = OUTPUT_BASE_DIR / PROPERTIES.get(
+    'output.llm_repair_subdir',
+    'llm_repair',
+)
 INJECTION_REPORT_DIR = OUTPUT_BASE_DIR / PROPERTIES.get(
     'output.injection_report_subdir',
     'injection_report',
@@ -120,6 +129,8 @@ if SAVE_TO_FILE:
     PREPROCESSOR_RESULT_DIR.mkdir(parents=True, exist_ok=True)
     LLM_PROMPT_DIR.mkdir(parents=True, exist_ok=True)
     LLM_RESULT_DIR.mkdir(parents=True, exist_ok=True)
+    LLM_RAW_RESPONSE_DIR.mkdir(parents=True, exist_ok=True)
+    LLM_REPAIR_DIR.mkdir(parents=True, exist_ok=True)
     INJECTION_REPORT_DIR.mkdir(parents=True, exist_ok=True)
 
 s3_client = boto3.client(
@@ -190,6 +201,62 @@ def generate_filename(url: str) -> str:
     domain = parsed.netloc.replace('.', '_')
     
     return f"{domain}_{url_hash}_{timestamp}.html"
+
+
+def generate_trace_id(url: str) -> str:
+    """
+    Generate a stable trace id per pipeline call for artifact correlation.
+    """
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    url_hash = hashlib.md5(url.encode()).hexdigest()[:8]
+    parsed = urlparse(url)
+    domain = parsed.netloc.replace('.', '_') or 'unknown'
+    return f"{domain}_{url_hash}_{timestamp}"
+
+
+def save_debug_text(
+    output_dir: Path,
+    file_name: str,
+    content: str,
+) -> Path | None:
+    """
+    Save debug text artifact to local output directory.
+    """
+    if not SAVE_TO_FILE:
+        return None
+
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        file_path = output_dir / file_name
+        file_path.write_text(content, encoding='utf-8')
+        return file_path
+    except OSError as e:
+        print(f"[Warning] Failed to save debug artifact: {e}")
+        return None
+
+
+def save_debug_json(
+    output_dir: Path,
+    file_name: str,
+    payload: dict,
+) -> Path | None:
+    """
+    Save debug JSON artifact to local output directory.
+    """
+    if not SAVE_TO_FILE:
+        return None
+
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        file_path = output_dir / file_name
+        file_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding='utf-8',
+        )
+        return file_path
+    except (OSError, TypeError) as e:
+        print(f"[Warning] Failed to save debug JSON artifact: {e}")
+        return None
 
 def upload_to_object_storage(url: str, html_content: str) -> str | None:
     """
@@ -351,7 +418,12 @@ def build_llm_prompt(clean_html_content: str) -> str:
     return GEO_PROMPT_TEMPLATE.replace('{{CLEAN_HTML_CONTENT}}', clean_html_content)
 
 
-def save_llm_prompt_text(source_url: str, prompt_text: str) -> Path | None:
+def save_llm_prompt_text(
+    source_url: str,
+    prompt_text: str,
+    trace_id: str = '',
+    attempt: int = 0,
+) -> Path | None:
     """
     최종 LLM 프롬프트를 임시 로컬 파일로 저장합니다.
     """
@@ -360,13 +432,77 @@ def save_llm_prompt_text(source_url: str, prompt_text: str) -> Path | None:
         return None
 
     try:
-        file_path = LLM_PROMPT_DIR / generate_llm_prompt_filename(source_url)
+        if trace_id:
+            file_path = LLM_PROMPT_DIR / f"llm_prompt_{trace_id}_a{attempt}.txt"
+        else:
+            file_path = LLM_PROMPT_DIR / generate_llm_prompt_filename(source_url)
         file_path.write_text(prompt_text, encoding='utf-8')
         print(f"[Success] LLM prompt saved to {file_path}")
         return file_path
     except OSError as e:
         print(f"[Error] Failed to save LLM prompt locally: {e}")
         return None
+
+
+def save_llm_raw_response_artifact(
+    source_url: str,
+    llm_response: dict,
+    reason: str,
+    trace_id: str = '',
+) -> Path | None:
+    """
+    Save raw LLM response for parse-failure diagnostics.
+    """
+    payload = {
+        'timestamp': datetime.now(timezone.utc).isoformat(),
+        'source_url': source_url,
+        'reason': reason,
+        'llm_response': llm_response,
+    }
+    effective_trace = trace_id or generate_trace_id(source_url)
+    file_name = f"llm_raw_response_{effective_trace}.json"
+    return save_debug_json(LLM_RAW_RESPONSE_DIR, file_name, payload)
+
+
+def save_llm_repair_text_artifact(
+    source_url: str,
+    label: str,
+    content: str,
+    trace_id: str = '',
+) -> Path | None:
+    """
+    Save JSON-repair input/output text artifacts.
+    """
+    effective_trace = trace_id or generate_trace_id(source_url)
+    file_name = f"llm_repair_{label}_{effective_trace}.txt"
+    return save_debug_text(LLM_REPAIR_DIR, file_name, content)
+
+
+def save_llm_repair_json_artifact(
+    source_url: str,
+    label: str,
+    payload: dict[str, Any],
+    trace_id: str = '',
+) -> Path | None:
+    """
+    Save JSON-repair metadata artifacts.
+    """
+    effective_trace = trace_id or generate_trace_id(source_url)
+    file_name = f"llm_repair_{label}_{effective_trace}.json"
+    return save_debug_json(LLM_REPAIR_DIR, file_name, payload)
+
+
+def get_first_choice(llm_response: dict[str, Any]) -> dict[str, Any] | None:
+    """
+    Return the first response choice when available.
+    """
+    choices = llm_response.get('choices')
+    if not isinstance(choices, list) or not choices:
+        return None
+    first_choice = choices[0]
+    if not isinstance(first_choice, dict):
+        return None
+    return first_choice
 
 
 def call_llm_for_geo_optimization(source_url: str, clean_html_content: str) -> dict | None:
@@ -389,9 +525,11 @@ def call_llm_for_geo_optimization(source_url: str, clean_html_content: str) -> d
             )
             return None
     
+    trace_id = generate_trace_id(source_url)
+
     for idx, max_tokens in enumerate(LLM_RETRY_MAX_TOKENS, start=1):
         final_prompt = build_llm_prompt(clean_html_content)
-        save_llm_prompt_text(source_url, final_prompt)
+        save_llm_prompt_text(source_url, final_prompt, trace_id=trace_id, attempt=idx)
 
         payload = {
             'model': LLM_MODEL,
@@ -414,19 +552,60 @@ def call_llm_for_geo_optimization(source_url: str, clean_html_content: str) -> d
         try:
             with urlopen(request, timeout=LLM_TIMEOUT_SECONDS) as response:
                 body = response.read().decode('utf-8', errors='replace')
+                response_json = json.loads(body)
+                if isinstance(response_json, dict):
+                    response_json['_trace'] = {
+                        'trace_id': trace_id,
+                        'attempt': idx,
+                        'max_tokens': max_tokens,
+                    }
+
+                first_choice = get_first_choice(response_json) if isinstance(response_json, dict) else None
+                finish_reason = first_choice.get('finish_reason') if first_choice else None
+                if finish_reason == 'length':
+                    save_llm_raw_response_artifact(
+                        source_url,
+                        response_json if isinstance(response_json, dict) else {'raw_body': body},
+                        f'finish_reason_length_a{idx}',
+                        trace_id=trace_id,
+                    )
+                    print(
+                        f"[Warning] LLM response truncated by max_tokens "
+                        f"(attempt={idx}, max_tokens={max_tokens}). Retrying."
+                    )
+                    continue
+
                 print(
                     f"[Success] LLM called: {LLM_API_URL} "
                     f"(attempt={idx}, max_tokens={max_tokens})"
                 )
-                return json.loads(body)
+                return response_json
         except HTTPError as e:
             error_body = e.read().decode('utf-8', errors='replace')
+            save_llm_repair_text_artifact(
+                source_url,
+                f'http_error_a{idx}',
+                error_body,
+                trace_id=trace_id,
+            )
             print(
                 f"[Warning] LLM API HTTP {e.code} "
                 f"(attempt={idx}): {error_body}"
             )
             continue
-        except (OSError, json.JSONDecodeError) as e:
+        except json.JSONDecodeError as e:
+            save_llm_repair_text_artifact(
+                source_url,
+                f'invalid_json_a{idx}',
+                body if 'body' in locals() else str(e),
+                trace_id=trace_id,
+            )
+            print(
+                f"[Warning] LLM call returned invalid JSON "
+                f"(attempt={idx}): {e}"
+            )
+            continue
+        except OSError as e:
             print(
                 f"[Warning] LLM call failed "
                 f"(attempt={idx}): {e}"
@@ -483,7 +662,11 @@ def try_parse_geo_json(json_text: str) -> dict | None:
     return None
 
 
-def call_llm_json_repair(raw_content: str) -> dict | None:
+def call_llm_json_repair(
+    raw_content: str,
+    source_url: str = 'https://unknown.local/',
+    trace_id: str = '',
+) -> dict | None:
     """
     깨진 JSON 텍스트를 strict JSON 객체로 정규화합니다.
     """
@@ -492,6 +675,7 @@ def call_llm_json_repair(raw_content: str) -> dict | None:
         'Repair the following content into valid JSON while preserving original meaning:\n\n'
         f'{raw_content}'
     )
+    repair_max_tokens = max([500, *LLM_RETRY_MAX_TOKENS])
     payload = {
         'model': LLM_MODEL,
         'messages': [
@@ -501,7 +685,7 @@ def call_llm_json_repair(raw_content: str) -> dict | None:
             }
         ],
         'temperature': 0,
-        'max_tokens': 500,
+        'max_tokens': repair_max_tokens,
     }
     request = Request(
         LLM_API_URL,
@@ -510,59 +694,202 @@ def call_llm_json_repair(raw_content: str) -> dict | None:
         method='POST',
     )
 
+    save_llm_repair_text_artifact(
+        source_url,
+        'input_raw_content',
+        raw_content,
+        trace_id=trace_id,
+    )
+    save_llm_repair_text_artifact(
+        source_url,
+        'input_prompt',
+        repair_prompt,
+        trace_id=trace_id,
+    )
+    save_llm_repair_json_artifact(
+        source_url,
+        'request_payload',
+        payload,
+        trace_id=trace_id,
+    )
+
     try:
         with urlopen(request, timeout=120) as response:
             body = response.read().decode('utf-8', errors='replace')
+            save_llm_repair_text_artifact(
+                source_url,
+                'output_raw',
+                body,
+                trace_id=trace_id,
+            )
             response_json = json.loads(body)
+            save_llm_repair_json_artifact(
+                source_url,
+                'response_json',
+                response_json,
+                trace_id=trace_id,
+            )
+            first_choice = get_first_choice(response_json)
+            finish_reason = first_choice.get('finish_reason') if first_choice else None
+            if finish_reason == 'length':
+                save_llm_repair_text_artifact(
+                    source_url,
+                    'failure_reason',
+                    'Repair response was truncated by max_tokens (finish_reason=length).',
+                    trace_id=trace_id,
+                )
+                return None
             choices = response_json.get('choices')
             if not isinstance(choices, list) or not choices:
+                save_llm_repair_text_artifact(
+                    source_url,
+                    'failure_reason',
+                    'Repair response missing choices.',
+                    trace_id=trace_id,
+                )
                 return None
             repaired_content = choices[0].get('message', {}).get('content', '')
             if not isinstance(repaired_content, str) or not repaired_content.strip():
+                save_llm_repair_text_artifact(
+                    source_url,
+                    'failure_reason',
+                    'Repair response has empty message content.',
+                    trace_id=trace_id,
+                )
                 return None
+
+            save_llm_repair_text_artifact(
+                source_url,
+                'output_content',
+                repaired_content,
+                trace_id=trace_id,
+            )
 
             repaired_text = extract_json_text(repaired_content)
             if not repaired_text:
+                save_llm_repair_text_artifact(
+                    source_url,
+                    'failure_reason',
+                    'Unable to locate JSON block in repair output content.',
+                    trace_id=trace_id,
+                )
                 return None
 
             repaired_obj = try_parse_geo_json(repaired_text)
             if repaired_obj:
                 print('[Success] LLM JSON repair succeeded.')
-            return repaired_obj
-    except (OSError, json.JSONDecodeError, HTTPError):
+                return repaired_obj
+            save_llm_repair_text_artifact(
+                source_url,
+                'failure_reason',
+                'Repair output still could not be parsed into a JSON object.',
+                trace_id=trace_id,
+            )
+            return None
+    except HTTPError as e:
+        error_body = e.read().decode('utf-8', errors='replace')
+        save_llm_repair_text_artifact(
+            source_url,
+            'failure_reason',
+            f'Repair HTTPError {e.code}',
+            trace_id=trace_id,
+        )
+        save_llm_repair_text_artifact(
+            source_url,
+            'failure_http_body',
+            error_body,
+            trace_id=trace_id,
+        )
+        return None
+    except json.JSONDecodeError as e:
+        save_llm_repair_text_artifact(
+            source_url,
+            'failure_reason',
+            f'Repair response JSON decode error: {e}',
+            trace_id=trace_id,
+        )
+        return None
+    except OSError as e:
+        save_llm_repair_text_artifact(
+            source_url,
+            'failure_reason',
+            f'Repair OSError: {e}',
+            trace_id=trace_id,
+        )
         return None
 
 
-def extract_geo_json_from_llm_response(llm_response: dict) -> dict | None:
+def extract_geo_json_from_llm_response(
+    llm_response: dict,
+    source_url: str = 'https://unknown.local/',
+) -> dict | None:
     """
     LLM 응답에서 순수 GEO 결과 JSON만 파싱합니다.
     """
     try:
+        trace = llm_response.get('_trace', {})
+        trace_id = trace.get('trace_id', '') if isinstance(trace, dict) else ''
+
         choices = llm_response.get('choices')
         if not isinstance(choices, list) or not choices:
             print('[Error] LLM response missing choices.')
+            save_llm_raw_response_artifact(
+                source_url,
+                llm_response,
+                'missing_choices',
+                trace_id=trace_id,
+            )
             return None
 
         message = choices[0].get('message', {})
         content = message.get('content')
         if not isinstance(content, str) or not content.strip():
             print('[Error] LLM response has empty message content.')
+            save_llm_raw_response_artifact(
+                source_url,
+                llm_response,
+                'empty_message_content',
+                trace_id=trace_id,
+            )
             return None
 
         json_text = extract_json_text(content)
         if not json_text:
             print('[Error] Unable to locate JSON block in LLM content.')
+            save_llm_raw_response_artifact(
+                source_url,
+                llm_response,
+                'json_block_not_found',
+                trace_id=trace_id,
+            )
             return None
 
         parsed = try_parse_geo_json(json_text)
         if parsed:
             return parsed
 
-        repaired = call_llm_json_repair(content)
+        save_llm_raw_response_artifact(
+            source_url,
+            llm_response,
+            'initial_parse_failed',
+            trace_id=trace_id,
+        )
+
+        repaired = call_llm_json_repair(
+            content,
+            source_url=source_url,
+            trace_id=trace_id,
+        )
         if repaired:
             return repaired
 
         print('[Error] Parsed GEO result is not a valid JSON object.')
+        save_llm_raw_response_artifact(
+            source_url,
+            llm_response,
+            'repair_failed',
+            trace_id=trace_id,
+        )
         return None
     except (KeyError, TypeError, json.JSONDecodeError) as e:
         print(f'[Error] Failed to parse GEO JSON from LLM response: {e}')
@@ -644,7 +971,10 @@ def resolve_input_file(input_value: str, default_dir: Path) -> Path:
     return (default_dir / candidate).resolve()
 
 
-def normalize_geo_result_json(llm_json: dict) -> dict | None:
+def normalize_geo_result_json(
+    llm_json: dict,
+    source_url: str = 'https://unknown.local/',
+) -> dict | None:
     """
     LLM 응답 JSON을 순수 GEO JSON으로 정규화합니다.
     - 이미 GEO JSON이면 그대로 반환
@@ -657,7 +987,7 @@ def normalize_geo_result_json(llm_json: dict) -> dict | None:
         return llm_json
 
     if 'choices' in llm_json:
-        return extract_geo_json_from_llm_response(llm_json)
+        return extract_geo_json_from_llm_response(llm_json, source_url=source_url)
 
     return None
 
@@ -721,7 +1051,7 @@ def run_pipeline_from_preprocessed_and_llm_files(
     if llm_json is None:
         return
 
-    geo_result_json = normalize_geo_result_json(llm_json)
+    geo_result_json = normalize_geo_result_json(llm_json, source_url=source_url)
     if geo_result_json is None:
         print('[Error] Unable to normalize LLM response to GEO JSON.')
         return
@@ -792,7 +1122,10 @@ def run_pipeline_from_rendered_file(
         return
 
     print('[Step][Start] Parse GEO JSON from LLM response')
-    geo_result_json = extract_geo_json_from_llm_response(llm_response)
+    geo_result_json = extract_geo_json_from_llm_response(
+        llm_response,
+        source_url=source_url,
+    )
     print(
         f"[Step][End] Parse GEO JSON from LLM response: "
         f"{'success' if geo_result_json else 'failed'}"
@@ -911,6 +1244,7 @@ async def process_url(url: str):
                             print('[Step][Start] Parse GEO JSON from LLM response')
                             geo_result_json = extract_geo_json_from_llm_response(
                                 llm_response,
+                                source_url=url,
                             )
                             print(
                                 f"[Step][End] Parse GEO JSON from LLM response: "

@@ -13,13 +13,13 @@ usage() {
 Purge log files from geo-analyzer output directories
 
 Usage:
-  ./purge_logs.sh --dry-run [--days N] [--type rendered_html|preprocessor|llm_prompt|llm_response|enriched_html|injection_report]
-  ./purge_logs.sh --all [--days N] [--type rendered_html|preprocessor|llm_prompt|llm_response|enriched_html|injection_report] [--confirm]
+  ./purge_logs.sh --dry-run [--days N] [--type rendered_html|preprocessor|llm_prompt|llm_response|llm_raw_response|llm_repair|enriched_html|injection_report]
+  ./purge_logs.sh --all [--days N] [--type rendered_html|preprocessor|llm_prompt|llm_response|llm_raw_response|llm_repair|enriched_html|injection_report] [--confirm]
 
 Options:
   --dry-run         Show files that would be deleted without deleting
   --days N          Only target files older than N days
-  --type TYPE       One of: rendered_html, preprocessor, llm_prompt, llm_response, enriched_html, injection_report
+  --type TYPE       One of: rendered_html, preprocessor, llm_prompt, llm_response, llm_raw_response, llm_repair, enriched_html, injection_report
   --all             Delete all matching files (required unless --dry-run)
   --confirm         Skip confirmation prompt before deletion
   --config PATH     Path to config.properties (default: ./config.properties)
@@ -29,6 +29,8 @@ Examples:
   ./purge_logs.sh --dry-run --days 7
   ./purge_logs.sh --all --confirm
   ./purge_logs.sh --type llm_prompt --days 3 --all --confirm
+  ./purge_logs.sh --type llm_raw_response --all --confirm
+  ./purge_logs.sh --type llm_repair --all --confirm
   ./purge_logs.sh --type rendered_html --all --confirm
   ./purge_logs.sh --type enriched_html --all --confirm
   ./purge_logs.sh --type injection_report --all --confirm
@@ -91,10 +93,10 @@ while [[ $# -gt 0 ]]; do
       fi
       TYPE="$2"
       case "$TYPE" in
-        rendered_html|preprocessor|llm_prompt|llm_response|enriched_html|injection_report)
+        rendered_html|preprocessor|llm_prompt|llm_response|llm_raw_response|llm_repair|enriched_html|injection_report)
           ;;
         *)
-          echo "Error: --type must be one of rendered_html, preprocessor, llm_prompt, llm_response, enriched_html, injection_report" >&2
+          echo "Error: --type must be one of rendered_html, preprocessor, llm_prompt, llm_response, llm_raw_response, llm_repair, enriched_html, injection_report" >&2
           exit 1
           ;;
       esac
@@ -144,6 +146,8 @@ RENDERED_HTML_SUBDIR="$(get_property "output.rendered_html_subdir")"
 PREPROCESSOR_SUBDIR="$(require_property "output.preprocessor_subdir")"
 LLM_PROMPT_SUBDIR="$(require_property "output.llm_prompt_subdir")"
 LLM_RESPONSE_SUBDIR="$(require_property "output.llm_subdir")"
+LLM_RAW_RESPONSE_SUBDIR="$(get_property "output.llm_raw_response_subdir")"
+LLM_REPAIR_SUBDIR="$(get_property "output.llm_repair_subdir")"
 ENRICHED_HTML_SUBDIR="$(get_property "output.enriched_html_subdir")"
 INJECTION_REPORT_SUBDIR="$(get_property "output.injection_report_subdir")"
 
@@ -155,6 +159,14 @@ if [[ -z "$ENRICHED_HTML_SUBDIR" ]]; then
   ENRICHED_HTML_SUBDIR="enriched_html"
 fi
 
+if [[ -z "$LLM_RAW_RESPONSE_SUBDIR" ]]; then
+  LLM_RAW_RESPONSE_SUBDIR="llm_raw_response"
+fi
+
+if [[ -z "$LLM_REPAIR_SUBDIR" ]]; then
+  LLM_REPAIR_SUBDIR="llm_repair"
+fi
+
 if [[ -z "$INJECTION_REPORT_SUBDIR" ]]; then
   INJECTION_REPORT_SUBDIR="injection_report"
 fi
@@ -163,6 +175,8 @@ RENDERED_HTML_DIR="$BASE_DIR/$RENDERED_HTML_SUBDIR"
 PREPROCESSOR_DIR="$BASE_DIR/$PREPROCESSOR_SUBDIR"
 LLM_PROMPT_DIR="$BASE_DIR/$LLM_PROMPT_SUBDIR"
 LLM_RESPONSE_DIR="$BASE_DIR/$LLM_RESPONSE_SUBDIR"
+LLM_RAW_RESPONSE_DIR="$BASE_DIR/$LLM_RAW_RESPONSE_SUBDIR"
+LLM_REPAIR_DIR="$BASE_DIR/$LLM_REPAIR_SUBDIR"
 ENRICHED_HTML_DIR="$BASE_DIR/$ENRICHED_HTML_SUBDIR"
 INJECTION_REPORT_DIR="$BASE_DIR/$INJECTION_REPORT_SUBDIR"
 
@@ -197,6 +211,12 @@ if [[ -n "$TYPE" ]]; then
     llm_response)
       add_target "llm_response" "$LLM_RESPONSE_DIR"
       ;;
+    llm_raw_response)
+      add_target "llm_raw_response" "$LLM_RAW_RESPONSE_DIR"
+      ;;
+    llm_repair)
+      add_target "llm_repair" "$LLM_REPAIR_DIR"
+      ;;
     enriched_html)
       add_target "enriched_html" "$ENRICHED_HTML_DIR"
       ;;
@@ -209,6 +229,8 @@ else
   add_target "preprocessor" "$PREPROCESSOR_DIR"
   add_target "llm_prompt" "$LLM_PROMPT_DIR"
   add_target "llm_response" "$LLM_RESPONSE_DIR"
+  add_target "llm_raw_response" "$LLM_RAW_RESPONSE_DIR"
+  add_target "llm_repair" "$LLM_REPAIR_DIR"
   add_target "enriched_html" "$ENRICHED_HTML_DIR"
   add_target "injection_report" "$INJECTION_REPORT_DIR"
 fi

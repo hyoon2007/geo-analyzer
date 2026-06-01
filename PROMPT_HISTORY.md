@@ -1,5 +1,36 @@
 # Prompt History & Changelog
 
+## Version 1.2: Length-Aware Retry and Repair Observability (2026-06-01)
+- **Date**: 2026-06-01
+- **Scope**: `main.py`, `README.md`, `config.properties.example`
+- **Status**: Applied
+- **Key Changes**:
+  - `finish_reason=length` 응답을 성공으로 반환하지 않고 다음 `max_tokens` 예산으로 재시도하도록 변경.
+  - JSON repair 입출력에 request/response 메타데이터와 실패 사유 로깅 추가.
+  - UTC 디버그 timestamp를 timezone-aware 형식으로 수정.
+  - 디버그 산출물 디렉터리(`llm_raw_response`, `llm_repair`)와 재시도 정책 문서화.
+- **Why**:
+  - 잘린 JSON 응답을 조기에 식별해 파싱 실패를 줄이기 위함.
+  - repair 실패 원인을 사후 분석 가능하게 만들기 위함.
+  - 현재 코드 기준 재시도 정책을 문서와 일치시키기 위함.
+
+## Version 1.1: Runtime-Aligned Schema Update (2026-06-01)
+- **Date**: 2026-06-01
+- **Scope**: `geo_prompt_template_v1_original.txt`, `geo_prompt_template.txt`, `utils/html_injection.py`
+- **Status**: Applied
+- **Key Changes**:
+  - Parser wording aligned to runtime selector engine (BeautifulSoup `select`), removing `lol_html` mismatch.
+  - Structural action schema changed from fixed 6-action enum to extensible form:
+    - `action`: `change_tag` | `update_text`
+    - `target_tag`: required when `action=change_tag`
+  - Added allow-list based `target_tag` validation in injector.
+  - Kept backward compatibility for legacy actions (`change_tag_to_h1` 등).
+  - Added defensive handling for non-object recommendation items.
+- **Why**:
+  - Reduce prompt-runtime mismatch errors.
+  - Improve extensibility without breaking existing LLM outputs.
+  - Keep structural injection behavior explicit and auditable.
+
 ## Version 1: Original (v1_original.txt)
 - **Date**: 2026-05-07
 - **Size**: 3,141 bytes
@@ -33,14 +64,14 @@
 ```
 prompt.file=geo_prompt_template_v1_original.txt
 llm.max_preprocessor_chars=3000
-llm.retry_budgets=[{"max_chars":3000,"max_tokens":200},...}]
+llm.retry_max_tokens=[1000,1500,2500]
 ```
 
 ### Using Optimized Prompt (v2)
 ```
 prompt.file=geo_prompt_template_v2_optimized.txt
 llm.max_preprocessor_chars=6000
-llm.retry_budgets=[{"max_chars":6000,"max_tokens":200},...}]
+llm.retry_max_tokens=[1000,1500,2500]
 ```
 
 ## Testing Results

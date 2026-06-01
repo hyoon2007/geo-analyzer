@@ -8,6 +8,8 @@ from bs4 import BeautifulSoup
 
 # Allowed structural audit actions
 ALLOWED_ACTIONS = {
+    'change_tag',
+    # Legacy actions (kept for backward compatibility)
     'change_tag_to_h1',
     'change_tag_to_h2',
     'change_tag_to_h3',
@@ -16,14 +18,62 @@ ALLOWED_ACTIONS = {
     'update_text',
 }
 
-# Tag mapping for change_tag_to_* actions
-TAG_MAP = {
+# Tag mapping for legacy change_tag_to_* actions
+LEGACY_TAG_MAP = {
     'change_tag_to_h1': 'h1',
     'change_tag_to_h2': 'h2',
     'change_tag_to_h3': 'h3',
     'change_tag_to_article': 'article',
     'change_tag_to_section': 'section',
 }
+
+# Expandable allow-list for change_tag target_tag
+ALLOWED_TARGET_TAGS = {
+    'h1',
+    'h2',
+    'h3',
+    'h4',
+    'h5',
+    'h6',
+    'article',
+    'section',
+    'main',
+    'nav',
+    'aside',
+    'header',
+    'footer',
+    'p',
+    'ul',
+    'ol',
+    'li',
+}
+
+
+def resolve_structural_action(rec: dict[str, Any]) -> tuple[str | None, str | None, str | None]:
+    """
+    Resolve action into normalized executable form.
+
+    Returns:
+        (normalized_action, target_tag, error_reason)
+    """
+    action = rec.get('action')
+
+    if action == 'update_text':
+        return 'update_text', None, None
+
+    if action == 'change_tag':
+        target_tag = rec.get('target_tag')
+        if not isinstance(target_tag, str) or not target_tag.strip():
+            return None, None, 'change_tag: target_tag is missing or empty'
+        target_tag = target_tag.strip().lower()
+        if target_tag not in ALLOWED_TARGET_TAGS:
+            return None, None, f"change_tag: unsupported target_tag '{target_tag}'"
+        return 'change_tag', target_tag, None
+
+    if action in LEGACY_TAG_MAP:
+        return 'change_tag', LEGACY_TAG_MAP[action], None
+
+    return None, None, f"Invalid action '{action}'"
 
 
 def apply_structural_audit_injector(
@@ -64,6 +114,19 @@ def apply_structural_audit_injector(
         return html, report
 
     for idx, rec in enumerate(recommendations):
+        if not isinstance(rec, dict):
+            report['skipped'] += 1
+            report['items'].append(
+                {
+                    'index': idx,
+                    'selector': None,
+                    'action': None,
+                    'status': 'skipped',
+                    'reason': 'recommendation item is not an object',
+                },
+            )
+            continue
+
         item_report = {
             'index': idx,
             'selector': rec.get('selector'),
@@ -80,6 +143,15 @@ def apply_structural_audit_injector(
             report['skipped'] += 1
             report['items'].append(item_report)
             continue
+
+        normalized_action, target_tag, action_error = resolve_structural_action(rec)
+        if action_error:
+            item_report['status'] = 'skipped'
+            item_report['reason'] = action_error
+            report['skipped'] += 1
+            report['items'].append(item_report)
+            continue
+        item_report['normalized_action'] = normalized_action
 
         # Validation: selector
         selector = rec.get('selector')
@@ -118,7 +190,7 @@ def apply_structural_audit_injector(
 
         # Apply action
         try:
-            if action == 'update_text':
+            if normalized_action == 'update_text':
                 new_text = rec.get('new_text')
                 if not isinstance(new_text, str) or not new_text.strip():
                     item_report['status'] = 'skipped'
@@ -133,8 +205,15 @@ def apply_structural_audit_injector(
                 item_report['old_text'] = old_text[:100]
                 item_report['new_text'] = new_text[:100]
 
-            elif action in TAG_MAP:
-                new_tag = TAG_MAP[action]
+            elif normalized_action == 'change_tag':
+                if target_tag is None:
+                    item_report['status'] = 'skipped'
+                    item_report['reason'] = 'change_tag: target_tag resolution failed'
+                    report['skipped'] += 1
+                    report['items'].append(item_report)
+                    continue
+
+                new_tag = target_tag
                 old_tag = node.name
                 node.name = new_tag
                 item_report['status'] = 'applied'

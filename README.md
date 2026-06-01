@@ -17,7 +17,10 @@
 
 - `main.py`: 전체 실행 코드
 - `config.properties`: 자주 변경되는 설정(스토리지/선처리기/LLM/프롬프트 파일 경로)
+- `config.properties.example`: 민감정보 제외된 설정 템플릿
 - `geo_prompt_template.txt`: LLM 프롬프트 텍스트
+- `geo_prompt_template_v1_original.txt`: 원본 프롬프트 템플릿(보존용)
+- `geo_prompt_template_v1_enhanced.txt`: 현재 기본 프롬프트 템플릿
 - `call_llm_result5.sh`: LLM 호출 규격 참고 스크립트
 - `purge_logs.sh`: 로그 파일 정리 스크립트
 - `README.md`: 본 문서
@@ -100,7 +103,9 @@ playwright install chromium
 - 렌더링 HTML: `output.rendered_html_subdir=rendered_html`
 - 선처리기 결과: `output.preprocessor_subdir=pre_response`
 - LLM 프롬프트: `output.llm_prompt_subdir=llm_prompt`
-- LLM 결과: `output.llm_subdir=llm_reponse`
+- LLM 결과: `output.llm_subdir=llm_response`
+- LLM 원본 응답 디버그: `output.llm_raw_response_subdir=llm_raw_response` (옵션, 미지정 시 기본값 사용)
+- JSON repair 입출력 디버그: `output.llm_repair_subdir=llm_repair` (옵션, 미지정 시 기본값 사용)
 
 ## 5. 핵심 구현 포인트
 
@@ -116,11 +121,18 @@ playwright install chromium
 - `llm.input_overflow_policy=error`면 초과 입력은 절단 없이 에러 처리
 - `llm.input_overflow_policy=truncate`면 초과 입력을 절단하여 호출
 - `LLM_RETRY_MAX_TOKENS`로 출력 토큰 예산 기반 재시도
+- 재시도 시 입력 HTML 크기를 단계별로 줄이지는 않으며, 필요 시 최초 1회만 `llm.max_preprocessor_chars` 기준으로 절단합니다.
+- `finish_reason=length` 응답은 성공으로 간주하지 않고, 다음 `max_tokens` 예산으로 재시도합니다.
+- 따라서 `llm.retry_max_tokens`는 작은 값에서 큰 값으로 증가하는 순서로 설정하는 것을 권장합니다.
 
 ### 5.3 구조 개선 & 메타 태그 주입
 
 - **Structural Audit**: LLM이 제안한 HTML 구조 개선사항 자동 적용
-  - 지원 action: `change_tag_to_h1`, `change_tag_to_h2`, `change_tag_to_h3`, `change_tag_to_article`, `change_tag_to_section`, `update_text`
+  - selector 기준: 현재 주입 엔진인 BeautifulSoup `select` 호환 CSS selector
+  - 기본 action 스키마: `change_tag`, `update_text`
+  - `change_tag` 사용 시 `target_tag` 필수
+  - 허용 `target_tag`: `h1`, `h2`, `h3`, `h4`, `h5`, `h6`, `article`, `section`, `main`, `nav`, `aside`, `header`, `footer`, `p`, `ul`, `ol`, `li`
+  - 하위 호환: legacy action(`change_tag_to_h1`, `change_tag_to_h2`, `change_tag_to_h3`, `change_tag_to_article`, `change_tag_to_section`)도 계속 수용
   - 안전 장치: selector 유일성 검증(0개/2개 이상 매칭 시 skip)
   - 결과: 구조 변경 내역과 사유 상세 기록
 
@@ -150,6 +162,17 @@ playwright install chromium
   - enriched_meta: 메타 태그 변경 이력
   - json_ld: JSON-LD 반영 여부
 - 용도: 자동화된 품질 검증 및 디버깅
+
+### 5.6 LLM 파싱 실패 디버그 산출물
+
+- 파싱 실패 시 원본 LLM 응답을 저장합니다.
+  - 경로: `output.base_dir/llm_raw_response/`
+  - 파일: `llm_raw_response_<trace_id>.json`
+- `finish_reason=length`로 잘린 응답도 동일 경로에 저장되어 재시도 전 상태를 확인할 수 있습니다.
+- JSON repair 사용 시 입력/출력을 저장합니다.
+  - 경로: `output.base_dir/llm_repair/`
+  - 파일: `llm_repair_input_*_<trace_id>.txt`, `llm_repair_output_*_<trace_id>.txt`, `llm_repair_request_payload_<trace_id>.json`, `llm_repair_response_json_<trace_id>.json`
+- 목적: 콘솔 로그만으로 재현이 어려운 malformed 응답을 사후 분석하기 위함
 
 ## 6. 실행 방법
 

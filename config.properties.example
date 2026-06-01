@@ -20,11 +20,11 @@ llm.temperature=0
 llm.max_preprocessor_chars=120000
 llm.input_overflow_policy=error
 # llm.input_overflow_policy=truncate
-llm.retry_max_tokens=[1000,500,300]
+llm.retry_max_tokens=[1000,1500,2500]
 llm.timeout_seconds=900
 
 # Prompt
-prompt.file=geo_prompt_template_v1_original.txt
+prompt.file=geo_prompt_template_v1_enhanced.txt
 
 # Local output
 output.save_enabled=true
@@ -33,6 +33,8 @@ output.rendered_html_subdir=rendered_html
 output.preprocessor_subdir=pre_response
 output.llm_prompt_subdir=llm_prompt
 output.llm_subdir=llm_response
+output.llm_raw_response_subdir=llm_raw_response
+output.llm_repair_subdir=llm_repair
 output.injection_report_subdir=injection_report
 
 # Debug mode

@@ -35,10 +35,9 @@
 ## 4. 목표 (Definition of Done)
 아래 4개를 만족하면 작업 완료로 판단합니다.
 
-1. structural_audit action 6종 적용 가능
-   - change_tag_to_h1, change_tag_to_h2, change_tag_to_h3
-   - change_tag_to_article, change_tag_to_section
-   - update_text
+1. structural_audit action 스키마 적용 가능
+  - 기본 스키마: `change_tag` + `target_tag`, `update_text`
+  - 하위 호환: 기존 6종 action(`change_tag_to_*`) 수용
 2. `enriched_meta.og_tags`가 실제 OG 메타 태그에 반영됨
 3. 항목별 반영 결과 리포트(JSON) 생성
    - applied / skipped / failed와 원인 포함
@@ -231,6 +230,13 @@
 - og_tags 스키마 설명 추가
 - 리포트 파일 해석법 추가
 
+### 추가 반영 (2026-06-01) ✅
+- 프롬프트의 selector 기준을 실행기와 정합화 (`lol_html` → BeautifulSoup `select` 기준)
+- structural action을 확장형 스키마(`change_tag` + `target_tag`)로 전환
+- 주입기에서 target_tag allow-list 검증 추가
+- legacy action(`change_tag_to_*`) 하위 호환 유지
+- recommendation 항목 타입 검증(비객체 항목 skip) 추가
+
 ### 최종 검증 (end-to-end 테스트)
 - Samsung UK: ✓ 완료
   - og:title ✓, og:description ✓ 반영됨
@@ -241,4 +247,5 @@
   - 리포트 저장 ✓
 
 ### 남은 작업
-- 없음 (모든 항목 완료)
+- 후속 고도화 과제로 이관
+  - 상세 백로그: `task-instructions/to-do.md`
