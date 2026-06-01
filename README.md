@@ -21,6 +21,7 @@
 - `geo_prompt_template.txt`: LLM 프롬프트 텍스트
 - `geo_prompt_template_v1_original.txt`: 원본 프롬프트 템플릿(보존용)
 - `geo_prompt_template_v1_enhanced.txt`: 현재 기본 프롬프트 템플릿
+- `geo_prompt_template_v4_enhanced.txt`: RAG 최적화/지식 그래프 확장 프롬프트 템플릿 (권장)
 - `call_llm_result5.sh`: LLM 호출 규격 참고 스크립트
 - `purge_logs.sh`: 로그 파일 정리 스크립트
 - `README.md`: 본 문서
@@ -106,6 +107,11 @@ playwright install chromium
 - LLM 결과: `output.llm_subdir=llm_response`
 - LLM 원본 응답 디버그: `output.llm_raw_response_subdir=llm_raw_response` (옵션, 미지정 시 기본값 사용)
 - JSON repair 입출력 디버그: `output.llm_repair_subdir=llm_repair` (옵션, 미지정 시 기본값 사용)
+- Semantic 분석 토글: `semantic.analysis_enabled=true|false` (기본 false)
+  - false일 때: 프롬프트의 출력 JSON 스키마에서 `semantic_analysis` 블록만 제거하고, 최종 GEO JSON output에서도 `semantic_analysis` 필드를 제외
+- RAG TL;DR 가시 주입 토글: `rag.injection_enabled=true|false` (기본 false)
+- RAG TL;DR 주입 위치: `rag.injection_target=main|article|body` (기본 main)
+- RAG TL;DR 최대 길이: `rag.tldr_max_chars=700`
 
 ## 5. 핵심 구현 포인트
 
@@ -144,6 +150,12 @@ playwright install chromium
 - **JSON-LD**: Schema.org 메타데이터 추가/업데이트
   - 같은 `@type` 기존 JSON-LD 제거 후 신규 추가
 
+- **RAG Optimization (Visible TL;DR)**: `rag_optimization.tldr_passage`를 본문 가시 영역에 주입
+  - 설정으로 on/off 가능 (`rag.injection_enabled`)
+  - 주입 위치 선택 가능 (`rag.injection_target`)
+  - 길이 상한 적용 (`rag.tldr_max_chars`)
+  - 기존 블록이 있으면 업데이트, 동일 텍스트면 no-op 처리
+
 ### 5.4 순수 GEO JSON만 저장
 
 - 저장 대상: `choices[0].message.content`에서 추출한 JSON 객체
@@ -161,6 +173,7 @@ playwright install chromium
   - structural_audit: 각 항목별 적용/스킵/실패 상태와 사유
   - enriched_meta: 메타 태그 변경 이력
   - json_ld: JSON-LD 반영 여부
+  - rag_optimization: TL;DR 가시 주입 반영 여부
 - 용도: 자동화된 품질 검증 및 디버깅
 
 ### 5.6 LLM 파싱 실패 디버그 산출물

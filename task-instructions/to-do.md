@@ -37,6 +37,10 @@
   - 코드 상수에서 config 기반으로 전환 여부 검토
 - [ ] 회귀 테스트 세트 구축
   - 실제 URL 샘플 + fixture HTML 기반 스모크 테스트 자동화
+- [ ] semantic_analysis 지식베이스 적재 파이프라인 설계
+  - `semantic_analysis.primary_topic`, `subtopics`, `extracted_entities`, `proven_facts`를 정규화해 저장
+  - 문서 단위 versioning/idempotency 키 설계 및 upsert 정책 정의
+  - 검색 인덱스/그래프 저장소 스키마(엔티티, 관계, 증거 문장) 매핑 정의
 
 ## 검토 필요 사항
 - [ ] semantic-only 모드 도입 여부

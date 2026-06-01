@@ -84,6 +84,10 @@ LLM_MAX_PREPROCESSOR_CHARS = int(PROPERTIES.get('llm.max_preprocessor_chars', '3
 LLM_INPUT_OVERFLOW_POLICY = PROPERTIES.get('llm.input_overflow_policy', 'error').lower()
 LLM_RETRY_MAX_TOKENS = json.loads(require_property(PROPERTIES, 'llm.retry_max_tokens'))
 LLM_TIMEOUT_SECONDS = int(PROPERTIES.get('llm.timeout_seconds', '120'))
+SEMANTIC_ANALYSIS_ENABLED = parse_bool(PROPERTIES.get('semantic.analysis_enabled', 'false'))
+RAG_INJECTION_ENABLED = parse_bool(PROPERTIES.get('rag.injection_enabled', 'false'))
+RAG_INJECTION_TARGET = PROPERTIES.get('rag.injection_target', 'main')
+RAG_TLDR_MAX_CHARS = int(PROPERTIES.get('rag.tldr_max_chars', '700'))
 
 if LLM_INPUT_OVERFLOW_POLICY not in {'error', 'truncate'}:
     raise ValueError(
@@ -415,7 +419,28 @@ def build_llm_prompt(clean_html_content: str) -> str:
     """
     shell 스크립트와 동일한 규칙으로 최종 프롬프트를 생성합니다.
     """
-    return GEO_PROMPT_TEMPLATE.replace('{{CLEAN_HTML_CONTENT}}', clean_html_content)
+    prompt_template = GEO_PROMPT_TEMPLATE
+    if not SEMANTIC_ANALYSIS_ENABLED:
+        prompt_template = prune_semantic_analysis_from_prompt(prompt_template)
+    return prompt_template.replace('{{CLEAN_HTML_CONTENT}}', clean_html_content)
+
+
+def prune_semantic_analysis_from_prompt(prompt_template: str) -> str:
+    """
+    semantic_analysis 비활성화 시 출력 JSON 스키마 블록만 제거합니다.
+    """
+    semantic_schema_pattern = (
+        r'\n  "semantic_analysis": \{.*?\n  \},\n'
+        r'  "rag_optimization": \{'
+    )
+    prompt_without_semantic_schema = re.sub(
+        semantic_schema_pattern,
+        '\n  "rag_optimization": {',
+        prompt_template,
+        flags=re.DOTALL,
+    )
+
+    return prompt_without_semantic_schema
 
 
 def save_llm_prompt_text(
@@ -984,12 +1009,23 @@ def normalize_geo_result_json(
         return None
 
     if any(k in llm_json for k in ('structural_audit', 'enriched_meta', 'json_ld')):
-        return llm_json
+        return filter_geo_result_json_by_config(llm_json)
 
     if 'choices' in llm_json:
-        return extract_geo_json_from_llm_response(llm_json, source_url=source_url)
+        extracted = extract_geo_json_from_llm_response(llm_json, source_url=source_url)
+        return filter_geo_result_json_by_config(extracted) if extracted else None
 
     return None
+
+
+def filter_geo_result_json_by_config(geo_result_json: dict[str, Any]) -> dict[str, Any]:
+    """
+    설정 기반으로 GEO 결과 JSON을 필터링합니다.
+    """
+    filtered = dict(geo_result_json)
+    if not SEMANTIC_ANALYSIS_ENABLED:
+        filtered.pop('semantic_analysis', None)
+    return filtered
 
 
 def run_injection_steps(
@@ -1005,6 +1041,9 @@ def run_injection_steps(
         source_url,
         preprocessed_html,
         geo_result_json,
+        rag_injection_enabled=RAG_INJECTION_ENABLED,
+        rag_injection_target=RAG_INJECTION_TARGET,
+        rag_tldr_max_chars=RAG_TLDR_MAX_CHARS,
         debug=DEBUG_ENABLED,
     )
     print('[Step][End] Inject GEO result into HTML: success')
@@ -1133,6 +1172,8 @@ def run_pipeline_from_rendered_file(
     if not geo_result_json:
         return
 
+    geo_result_json = filter_geo_result_json_by_config(geo_result_json)
+
     print('[Step][Start] Save GEO result JSON locally')
     llm_result_path = save_llm_response_json(source_url, geo_result_json)
     print(
@@ -1252,6 +1293,7 @@ async def process_url(url: str):
                             )
 
                             if geo_result_json:
+                                geo_result_json = filter_geo_result_json_by_config(geo_result_json)
                                 print('[Step][Start] Save GEO result JSON locally')
                                 llm_result_path = save_llm_response_json(
                                     url,
@@ -1267,6 +1309,9 @@ async def process_url(url: str):
                                     url,
                                     preprocessed_html,
                                     geo_result_json,
+                                    rag_injection_enabled=RAG_INJECTION_ENABLED,
+                                    rag_injection_target=RAG_INJECTION_TARGET,
+                                    rag_tldr_max_chars=RAG_TLDR_MAX_CHARS,
                                     debug=DEBUG_ENABLED,
                                 )
                                 print('[Step][End] Inject GEO result into HTML: success')

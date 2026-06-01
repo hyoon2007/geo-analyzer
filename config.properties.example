@@ -18,13 +18,20 @@ llm.api_url=http://your-llm-host/v1/chat/completions
 llm.model=Qwen/Qwen2.5-72B-Instruct-AWQ
 llm.temperature=0
 llm.max_preprocessor_chars=120000
+# Semantic analysis output control (default: off)
+semantic.analysis_enabled=false
 llm.input_overflow_policy=error
 # llm.input_overflow_policy=truncate
 llm.retry_max_tokens=[1000,1500,2500]
 llm.timeout_seconds=900
 
 # Prompt
-prompt.file=geo_prompt_template_v1_enhanced.txt
+prompt.file=geo_prompt_template_v4_enhanced.txt
+
+# RAG visible passage injection
+rag.injection_enabled=false
+rag.injection_target=main
+rag.tldr_max_chars=700
 
 # Local output
 output.save_enabled=true

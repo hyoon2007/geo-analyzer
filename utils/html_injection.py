@@ -1,5 +1,5 @@
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 from pathlib import Path
 
@@ -415,26 +415,138 @@ def apply_json_ld_manager(
         return html, report
 
 
+def apply_rag_optimization_injector(
+    html: str,
+    rag_optimization: dict[str, Any],
+    *,
+    enabled: bool,
+    target: str,
+    max_chars: int,
+    debug: bool = False,
+) -> tuple[str, dict[str, Any]]:
+    """
+    Inject rag_optimization.tldr_passage into a visible area of the document.
+
+    Returns:
+        (modified_html, report_dict)
+    """
+    report = {
+        'status': 'passed',
+        'items': [],
+    }
+
+    if not enabled:
+        report['status'] = 'skipped'
+        report['items'].append({'reason': 'rag injection disabled by config'})
+        return html, report
+
+    if not isinstance(rag_optimization, dict):
+        report['status'] = 'skipped'
+        report['items'].append({'reason': 'rag_optimization is not a dict'})
+        return html, report
+
+    tldr_passage = rag_optimization.get('tldr_passage')
+    if not isinstance(tldr_passage, str) or not tldr_passage.strip():
+        report['status'] = 'skipped'
+        report['items'].append({'reason': 'rag_optimization.tldr_passage is missing or empty'})
+        return html, report
+
+    # Keep passage size bounded for stable rendering and indexing behavior.
+    normalized_passage = tldr_passage.strip()
+    if max_chars > 0 and len(normalized_passage) > max_chars:
+        normalized_passage = normalized_passage[:max_chars]
+        report['items'].append({'warning': f'tldr_passage truncated to {max_chars} chars'})
+
+    try:
+        soup = BeautifulSoup(html, 'html.parser')
+
+        body = soup.find('body')
+        if body is None:
+            report['status'] = 'failed'
+            report['items'].append({'reason': 'No <body> tag found'})
+            return html, report
+
+        target_key = (target or 'main').strip().lower()
+        if target_key == 'main':
+            anchor = body.find('main') or body.find('article') or body
+        elif target_key == 'article':
+            anchor = body.find('article') or body.find('main') or body
+        else:
+            anchor = body
+
+        existing_block = soup.find('section', attrs={'data-geo-generated': 'rag_tldr'})
+        if existing_block is not None:
+            text_node = existing_block.find('p')
+            if text_node is None:
+                text_node = soup.new_tag('p')
+                existing_block.append(text_node)
+            old_text = text_node.get_text(strip=False)
+            if old_text == normalized_passage:
+                report['status'] = 'skipped'
+                report['items'].append({'reason': 'rag tldr no-op (same text already injected)'})
+                return str(soup), report
+
+            text_node.string = normalized_passage
+            report['status'] = 'applied'
+            report['items'].append('updated existing visible rag tldr block')
+            return str(soup), report
+
+        rag_section = soup.new_tag(
+            'section',
+            attrs={
+                'class': 'geo-tldr',
+                'data-geo-generated': 'rag_tldr',
+            },
+        )
+        rag_title = soup.new_tag('h2')
+        rag_title.string = 'Quick Summary'
+        rag_paragraph = soup.new_tag('p')
+        rag_paragraph.string = normalized_passage
+        rag_section.append(rag_title)
+        rag_section.append(rag_paragraph)
+
+        anchor.insert(0, rag_section)
+        report['status'] = 'applied'
+        report['items'].append(f"inserted visible rag tldr block under <{anchor.name}>")
+
+        if debug:
+            print('[Debug] RAG Optimization Injector changes:')
+            for line in report['items']:
+                print(f'  - {line}')
+
+        return str(soup), report
+
+    except (AttributeError, TypeError, ValueError) as e:
+        report['status'] = 'failed'
+        report['items'].append({'reason': str(e)})
+        print(f"[Error] RAG optimization injection failed: {e}")
+        return html, report
+
+
 def inject_llm_results_to_html(
     source_url: str,
     preprocessed_html: str,
     geo_result_json: dict[str, Any],
+    rag_injection_enabled: bool = False,
+    rag_injection_target: str = 'main',
+    rag_tldr_max_chars: int = 700,
     debug: bool = False,
 ) -> tuple[str, dict[str, Any]]:
     """
     Build enriched HTML by applying GEO result fields to preprocessed HTML.
-    Execution order: structural_audit → enriched_meta → json_ld
+    Execution order: structural_audit → enriched_meta → json_ld → rag_optimization
     
     Returns:
         (enriched_html, injection_report)
     """
     enriched_html = preprocessed_html
     injection_report = {
-        'timestamp': datetime.utcnow().isoformat(),
+        'timestamp': datetime.now(timezone.utc).isoformat(),
         'source_url': source_url,
         'structural_audit': {},
         'enriched_meta': {},
         'json_ld': {},
+        'rag_optimization': {},
     }
 
     # Step 1: Apply structural audit
@@ -460,6 +572,32 @@ def inject_llm_results_to_html(
             enriched_html, json_ld, debug
         )
         injection_report['json_ld'] = json_ld_report
+
+    # Step 4: Apply RAG optimization visible passage
+    rag_optimization = geo_result_json.get('rag_optimization')
+    if not isinstance(rag_optimization, dict):
+        # Backward compatibility for older prompt schema.
+        legacy_rag = geo_result_json.get('rag_optimized_passage')
+        if isinstance(legacy_rag, dict):
+            rag_optimization = {
+                'tldr_passage': legacy_rag.get('tldr_passage') or legacy_rag.get('tldr_chunk', ''),
+            }
+
+    if isinstance(rag_optimization, dict):
+        enriched_html, rag_report = apply_rag_optimization_injector(
+            enriched_html,
+            rag_optimization,
+            enabled=rag_injection_enabled,
+            target=rag_injection_target,
+            max_chars=rag_tldr_max_chars,
+            debug=debug,
+        )
+        injection_report['rag_optimization'] = rag_report
+    else:
+        injection_report['rag_optimization'] = {
+            'status': 'skipped',
+            'items': [{'reason': 'rag_optimization field not found'}],
+        }
 
     if debug:
         print(f"[Debug] HTML injection completed for {source_url}")
