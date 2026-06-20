@@ -24,6 +24,9 @@ llm.input_overflow_policy=error
 # llm.input_overflow_policy=truncate
 llm.retry_max_tokens=[1000,1500,2500]
 llm.timeout_seconds=900
+llm.connect_timeout_seconds=15
+llm.read_timeout_seconds=900
+llm.stream_enabled=false
 
 # Prompt
 prompt.file=geo_prompt_template_v4_enhanced.txt
@@ -49,3 +52,21 @@ debug.enabled=true
 
 # Playwright
 playwright.goto_timeout_ms=60000
+playwright.post_load_wait_ms=0
+# default | android_chrome_mobile | desktop_chrome
+browser.request_profile=default
+browser.diagnostics_enabled=false
+browser.save_render_diagnostics=false
+browser.capture_shadow_dom=false
+browser.capture_frames_html=false
+browser.auto_scroll_enabled=false
+browser.auto_scroll_step_px=800
+browser.auto_scroll_wait_ms=300
+browser.auto_scroll_max_steps=20
+# allow | block
+browser.service_workers=allow
+browser.block_third_party_domains=false
+# Optional. Empty means infer from target URL, e.g. www.example.com -> example.com.
+browser.primary_domain_override=
+# Optional comma-separated allowlist for required CDN/API domains.
+browser.allowed_extra_domains=

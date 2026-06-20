@@ -1,8 +1,12 @@
 import asyncio
 import argparse
+import http.client
 import hashlib
 import json
 import re
+import socket
+import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -50,6 +54,13 @@ def parse_bool(value: str) -> bool:
     return value.strip().lower() in {'1', 'true', 'yes', 'on'}
 
 
+def parse_csv_property(value: str) -> list[str]:
+    """
+    Comma-separated properties 값을 리스트로 파싱합니다.
+    """
+    return [item.strip().lower() for item in value.split(',') if item.strip()]
+
+
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / 'config.properties'
 PROPERTIES = load_properties(CONFIG_PATH)
@@ -77,6 +88,37 @@ PREPROCESSOR_PATH = require_property(PROPERTIES, 'preprocessor.path')
 LLM_API_URL = require_property(PROPERTIES, 'llm.api_url')
 DEBUG_ENABLED = parse_bool(PROPERTIES.get('debug.enabled', 'true'))
 PLAYWRIGHT_GOTO_TIMEOUT_MS = int(PROPERTIES.get('playwright.goto_timeout_ms', '60000'))
+PLAYWRIGHT_POST_LOAD_WAIT_MS = int(PROPERTIES.get('playwright.post_load_wait_ms', '0'))
+BROWSER_REQUEST_PROFILE = PROPERTIES.get('browser.request_profile', 'default').lower()
+BROWSER_DIAGNOSTICS_ENABLED = parse_bool(
+    PROPERTIES.get('browser.diagnostics_enabled', 'false'),
+)
+BROWSER_BLOCK_THIRD_PARTY_DOMAINS = parse_bool(
+    PROPERTIES.get('browser.block_third_party_domains', 'false'),
+)
+BROWSER_PRIMARY_DOMAIN_OVERRIDE = PROPERTIES.get(
+    'browser.primary_domain_override',
+    '',
+).strip().lower()
+BROWSER_ALLOWED_EXTRA_DOMAINS = parse_csv_property(
+    PROPERTIES.get('browser.allowed_extra_domains', ''),
+)
+BROWSER_SERVICE_WORKERS = PROPERTIES.get('browser.service_workers', 'allow').lower()
+BROWSER_SAVE_RENDER_DIAGNOSTICS = parse_bool(
+    PROPERTIES.get('browser.save_render_diagnostics', 'false'),
+)
+BROWSER_CAPTURE_SHADOW_DOM = parse_bool(
+    PROPERTIES.get('browser.capture_shadow_dom', 'false'),
+)
+BROWSER_CAPTURE_FRAMES_HTML = parse_bool(
+    PROPERTIES.get('browser.capture_frames_html', 'false'),
+)
+BROWSER_AUTO_SCROLL_ENABLED = parse_bool(
+    PROPERTIES.get('browser.auto_scroll_enabled', 'false'),
+)
+BROWSER_AUTO_SCROLL_STEP_PX = int(PROPERTIES.get('browser.auto_scroll_step_px', '800'))
+BROWSER_AUTO_SCROLL_WAIT_MS = int(PROPERTIES.get('browser.auto_scroll_wait_ms', '300'))
+BROWSER_AUTO_SCROLL_MAX_STEPS = int(PROPERTIES.get('browser.auto_scroll_max_steps', '20'))
 
 LLM_MODEL = require_property(PROPERTIES, 'llm.model')
 LLM_TEMPERATURE = float(require_property(PROPERTIES, 'llm.temperature'))
@@ -84,6 +126,13 @@ LLM_MAX_PREPROCESSOR_CHARS = int(PROPERTIES.get('llm.max_preprocessor_chars', '3
 LLM_INPUT_OVERFLOW_POLICY = PROPERTIES.get('llm.input_overflow_policy', 'error').lower()
 LLM_RETRY_MAX_TOKENS = json.loads(require_property(PROPERTIES, 'llm.retry_max_tokens'))
 LLM_TIMEOUT_SECONDS = int(PROPERTIES.get('llm.timeout_seconds', '120'))
+LLM_CONNECT_TIMEOUT_SECONDS = float(
+    PROPERTIES.get('llm.connect_timeout_seconds', '15'),
+)
+LLM_READ_TIMEOUT_SECONDS = float(
+    PROPERTIES.get('llm.read_timeout_seconds', str(LLM_TIMEOUT_SECONDS)),
+)
+LLM_STREAM_ENABLED = parse_bool(PROPERTIES.get('llm.stream_enabled', 'false'))
 SEMANTIC_ANALYSIS_ENABLED = parse_bool(PROPERTIES.get('semantic.analysis_enabled', 'false'))
 RAG_INJECTION_ENABLED = parse_bool(PROPERTIES.get('rag.injection_enabled', 'false'))
 RAG_INJECTION_TARGET = PROPERTIES.get('rag.injection_target', 'main')
@@ -93,6 +142,32 @@ if LLM_INPUT_OVERFLOW_POLICY not in {'error', 'truncate'}:
     raise ValueError(
         "Invalid llm.input_overflow_policy. Use 'error' or 'truncate'."
     )
+
+if BROWSER_REQUEST_PROFILE not in {'default', 'android_chrome_mobile', 'desktop_chrome'}:
+    raise ValueError(
+        "Invalid browser.request_profile. Use 'default', 'android_chrome_mobile', or 'desktop_chrome'."
+    )
+
+if BROWSER_SERVICE_WORKERS not in {'allow', 'block'}:
+    raise ValueError("Invalid browser.service_workers. Use 'allow' or 'block'.")
+
+if LLM_CONNECT_TIMEOUT_SECONDS <= 0:
+    raise ValueError('llm.connect_timeout_seconds must be > 0')
+
+if LLM_READ_TIMEOUT_SECONDS <= 0:
+    raise ValueError('llm.read_timeout_seconds must be > 0')
+
+if PLAYWRIGHT_POST_LOAD_WAIT_MS < 0:
+    raise ValueError('playwright.post_load_wait_ms must be >= 0')
+
+if BROWSER_AUTO_SCROLL_STEP_PX <= 0:
+    raise ValueError('browser.auto_scroll_step_px must be > 0')
+
+if BROWSER_AUTO_SCROLL_WAIT_MS < 0:
+    raise ValueError('browser.auto_scroll_wait_ms must be >= 0')
+
+if BROWSER_AUTO_SCROLL_MAX_STEPS < 0:
+    raise ValueError('browser.auto_scroll_max_steps must be >= 0')
 
 PROMPT_FILE_PATH = BASE_DIR / require_property(PROPERTIES, 'prompt.file')
 GEO_PROMPT_TEMPLATE = PROMPT_FILE_PATH.read_text(encoding='utf-8')
@@ -148,8 +223,280 @@ s3_client = boto3.client(
 USER_AGENT = (
     'Akam-GEOAgent/1.0'
 )
+ANDROID_CHROME_MOBILE_USER_AGENT = (
+    'Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 '
+    '(KHTML, like Gecko) Chrome/149.0.0.0 Mobile Safari/537.36'
+)
+ANDROID_CHROME_MOBILE_HEADERS = {
+    'accept-language': 'en-US,en;q=0.9,ko;q=0.8',
+    'sec-ch-ua': '"Google Chrome";v="149", "Chromium";v="149", "Not)A;Brand";v="24"',
+    'sec-ch-ua-mobile': '?1',
+    'sec-ch-ua-platform': '"Android"',
+    'sec-fetch-dest': 'document',
+    'sec-fetch-mode': 'navigate',
+    'sec-fetch-site': 'same-origin',
+    'sec-fetch-user': '?1',
+}
+DESKTOP_CHROME_USER_AGENT = (
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 '
+    '(KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36'
+)
+DESKTOP_CHROME_HEADERS = {
+    **ANDROID_CHROME_MOBILE_HEADERS,
+    'sec-ch-ua-mobile': '?0',
+    'sec-ch-ua-platform': '"Desktop"',
+}
 MAX_RETRIES = 3
 RETRY_DELAY = 2  # 초
+
+
+def build_browser_context_options() -> dict[str, Any]:
+    """
+    Build Playwright browser context options from config.properties.
+    """
+    if BROWSER_REQUEST_PROFILE == 'android_chrome_mobile':
+        return {
+            'user_agent': ANDROID_CHROME_MOBILE_USER_AGENT,
+            'extra_http_headers': ANDROID_CHROME_MOBILE_HEADERS,
+            'is_mobile': True,
+            'has_touch': True,
+            'viewport': {
+                'width': 412,
+                'height': 915,
+            },
+            'device_scale_factor': 2.625,
+            'service_workers': BROWSER_SERVICE_WORKERS,
+        }
+
+    if BROWSER_REQUEST_PROFILE == 'desktop_chrome':
+        return {
+            'user_agent': DESKTOP_CHROME_USER_AGENT,
+            'extra_http_headers': DESKTOP_CHROME_HEADERS,
+            'viewport': {
+                'width': 1440,
+                'height': 900,
+            },
+            'device_scale_factor': 1,
+            'service_workers': BROWSER_SERVICE_WORKERS,
+        }
+
+    return {
+        'user_agent': USER_AGENT,
+        'service_workers': BROWSER_SERVICE_WORKERS,
+    }
+
+
+def attach_browser_diagnostics(page) -> None:
+    """
+    Print focused browser diagnostics while rendering.
+    """
+    if not BROWSER_DIAGNOSTICS_ENABLED:
+        return
+
+    def log_console_message(message) -> None:
+        print(f"[Browser][Console][{message.type}] {message.text}")
+
+    def log_page_error(error) -> None:
+        print(f"[Browser][PageError] {error}")
+
+    def log_request_failed(request) -> None:
+        failure = request.failure or 'unknown'
+        print(
+            f"[Browser][RequestFailed] {request.method} {request.url} "
+            f"failure={failure}"
+        )
+
+    def log_response(response) -> None:
+        if response.status >= 400:
+            print(
+                f"[Browser][HTTP {response.status}] "
+                f"{response.request.method} {response.url}"
+            )
+
+    def log_frame_navigated(frame) -> None:
+        if frame == page.main_frame:
+            print(f"[Browser][Navigation] main_frame_url={frame.url}")
+
+    page.on('console', log_console_message)
+    page.on('pageerror', log_page_error)
+    page.on('requestfailed', log_request_failed)
+    page.on('response', log_response)
+    page.on('framenavigated', log_frame_navigated)
+
+
+def get_site_domain(hostname: str) -> str:
+    """
+    Return a simple site-domain approximation for request filtering.
+    """
+    hostname = hostname.lower().strip('.')
+    parts = hostname.split('.')
+    if len(parts) <= 2:
+        return hostname
+    return '.'.join(parts[-2:])
+
+
+def domain_matches(hostname: str, allowed_domain: str) -> bool:
+    """
+    True when hostname is allowed_domain or one of its subdomains.
+    """
+    hostname = hostname.lower().strip('.')
+    allowed_domain = allowed_domain.lower().strip('.')
+    return hostname == allowed_domain or hostname.endswith(f'.{allowed_domain}')
+
+
+def resolve_primary_domain(url: str) -> str:
+    """
+    Resolve the primary domain used by browser third-party request filtering.
+    """
+    if BROWSER_PRIMARY_DOMAIN_OVERRIDE:
+        return BROWSER_PRIMARY_DOMAIN_OVERRIDE
+
+    hostname = urlparse(url).hostname or ''
+    return get_site_domain(hostname)
+
+
+async def attach_domain_request_filter(context, source_url: str) -> None:
+    """
+    Optionally block browser requests outside the source site's primary domain.
+    """
+    if not BROWSER_BLOCK_THIRD_PARTY_DOMAINS:
+        return
+
+    primary_domain = resolve_primary_domain(source_url)
+    allowed_domains = [primary_domain, *BROWSER_ALLOWED_EXTRA_DOMAINS]
+
+    async def route_request(route, request) -> None:
+        parsed = urlparse(request.url)
+        if parsed.scheme not in {'http', 'https'}:
+            await route.continue_()
+            return
+
+        hostname = parsed.hostname or ''
+        if any(domain_matches(hostname, domain) for domain in allowed_domains):
+            await route.continue_()
+            return
+
+        if BROWSER_DIAGNOSTICS_ENABLED:
+            print(
+                f"[Browser][BlockedThirdParty] {request.method} {request.url}"
+            )
+        await route.abort()
+
+    print(
+        "[Info] Browser third-party domain blocking enabled: "
+        f"primary={primary_domain}, extra={BROWSER_ALLOWED_EXTRA_DOMAINS or []}"
+    )
+    await context.route('**/*', route_request)
+
+
+async def get_rendered_html(page) -> str:
+    """
+    Return rendered HTML, optionally embedding open shadow roots for analysis.
+    """
+    if not BROWSER_CAPTURE_SHADOW_DOM:
+        return await page.content()
+
+    return await page.evaluate(
+        """
+        () => {
+          const copyShadowRoots = (source, target) => {
+            if (!source || !target || source.nodeType !== Node.ELEMENT_NODE) {
+              return;
+            }
+
+            if (source.shadowRoot) {
+              const template = document.createElement('template');
+              template.setAttribute('shadowrootmode', source.shadowRoot.mode || 'open');
+              template.innerHTML = source.shadowRoot.innerHTML;
+              target.appendChild(template);
+            }
+
+            const sourceChildren = Array.from(source.children || []);
+            const targetChildren = Array.from(target.children || []).filter(
+              (child) => !(child.tagName === 'TEMPLATE' && child.hasAttribute('shadowrootmode'))
+            );
+
+            for (let i = 0; i < sourceChildren.length; i += 1) {
+              copyShadowRoots(sourceChildren[i], targetChildren[i]);
+            }
+          };
+
+          const clone = document.documentElement.cloneNode(true);
+          copyShadowRoots(document.documentElement, clone);
+          return '<!DOCTYPE html>\\n' + clone.outerHTML;
+        }
+        """
+    )
+
+
+async def auto_scroll_page(page) -> None:
+    """
+    Scroll through the page to trigger lazy rendering before capture.
+    """
+    if not BROWSER_AUTO_SCROLL_ENABLED:
+        return
+
+    print(
+        "[Info] Auto-scrolling page "
+        f"(step={BROWSER_AUTO_SCROLL_STEP_PX}px, "
+        f"wait={BROWSER_AUTO_SCROLL_WAIT_MS}ms, "
+        f"max_steps={BROWSER_AUTO_SCROLL_MAX_STEPS})"
+    )
+    result = await page.evaluate(
+        """
+        async ({ stepPx, waitMs, maxSteps }) => {
+          const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+          let steps = 0;
+          let lastY = -1;
+
+          while (steps < maxSteps) {
+            const currentY = window.scrollY || document.documentElement.scrollTop || 0;
+            const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+            const scrollHeight = Math.max(
+              document.body ? document.body.scrollHeight : 0,
+              document.documentElement ? document.documentElement.scrollHeight : 0
+            );
+
+            if (currentY + viewportHeight >= scrollHeight - 2) {
+              break;
+            }
+
+            window.scrollBy(0, stepPx);
+            await sleep(waitMs);
+
+            const nextY = window.scrollY || document.documentElement.scrollTop || 0;
+            if (nextY === lastY || nextY === currentY) {
+              break;
+            }
+
+            lastY = nextY;
+            steps += 1;
+          }
+
+          await sleep(waitMs);
+          window.scrollTo(0, 0);
+          await sleep(waitMs);
+
+          return {
+            steps,
+            scrollHeight: Math.max(
+              document.body ? document.body.scrollHeight : 0,
+              document.documentElement ? document.documentElement.scrollHeight : 0
+            )
+          };
+        }
+        """,
+        {
+            'stepPx': BROWSER_AUTO_SCROLL_STEP_PX,
+            'waitMs': BROWSER_AUTO_SCROLL_WAIT_MS,
+            'maxSteps': BROWSER_AUTO_SCROLL_MAX_STEPS,
+        },
+    )
+    print(
+        f"[Info] Auto-scroll complete: steps={result.get('steps')}, "
+        f"scrollHeight={result.get('scrollHeight')}"
+    )
+
 
 async def fetch_and_render_html(page, url: str, timeout_ms: int = 30000) -> str | None:
     """
@@ -166,14 +513,18 @@ async def fetch_and_render_html(page, url: str, timeout_ms: int = 30000) -> str 
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             await page.goto(url, wait_until='networkidle', timeout=timeout_ms)
-            html_content = await page.content()
+            if PLAYWRIGHT_POST_LOAD_WAIT_MS > 0:
+                print(f"[Info] Waiting {PLAYWRIGHT_POST_LOAD_WAIT_MS}ms after load")
+                await page.wait_for_timeout(PLAYWRIGHT_POST_LOAD_WAIT_MS)
+            await auto_scroll_page(page)
+            html_content = await get_rendered_html(page)
             print(f"[Success] Rendered {url} (Attempt {attempt}/{MAX_RETRIES})")
             return html_content
         except PlaywrightTimeoutError:
             print(f"[Warning] Timeout fetching {url} (Attempt {attempt}/{MAX_RETRIES}). "
                   f"Fallback to current DOM.")
             try:
-                return await page.content()
+                return await get_rendered_html(page)
             except (OSError, RuntimeError) as e:
                 print(f"[Error] Failed to get DOM after timeout: {e}")
                 if attempt < MAX_RETRIES:
@@ -370,6 +721,94 @@ def save_rendered_html(source_url: str, html_content: str) -> Path | None:
         return None
 
 
+async def save_render_diagnostics(page, rendered_html_path: Path | None) -> None:
+    """
+    Save screenshot and visible body text next to the rendered HTML artifact.
+    """
+    if not BROWSER_SAVE_RENDER_DIAGNOSTICS:
+        return
+
+    if not SAVE_TO_FILE or rendered_html_path is None:
+        print('[Info] Render diagnostics save skipped because rendered HTML was not saved.')
+        return
+
+    screenshot_path = rendered_html_path.with_suffix('.png')
+    inner_text_path = rendered_html_path.with_name(
+        f"{rendered_html_path.stem}_inner_text.txt"
+    )
+
+    try:
+        await page.screenshot(path=str(screenshot_path), full_page=True)
+        print(f"[Success] Render screenshot saved to {screenshot_path}")
+    except (OSError, RuntimeError) as e:
+        print(f"[Warning] Failed to save render screenshot: {e}")
+
+    try:
+        inner_text = await page.locator('body').inner_text(timeout=5000)
+        inner_text_path.write_text(inner_text, encoding='utf-8')
+        print(f"[Success] Render innerText saved to {inner_text_path}")
+    except (OSError, RuntimeError, PlaywrightTimeoutError) as e:
+        print(f"[Warning] Failed to save render innerText: {e}")
+
+
+async def save_frames_html(page, rendered_html_path: Path | None) -> None:
+    """
+    Save non-main frame HTML as a separate diagnostic artifact.
+    """
+    if not BROWSER_CAPTURE_FRAMES_HTML:
+        return
+
+    if not SAVE_TO_FILE or rendered_html_path is None:
+        print('[Info] Frame HTML capture skipped because rendered HTML was not saved.')
+        return
+
+    frames = [frame for frame in page.frames if frame != page.main_frame]
+    frames_path = rendered_html_path.with_name(
+        f"{rendered_html_path.stem}_frames.html"
+    )
+
+    sections: list[str] = [
+        '<!DOCTYPE html>',
+        '<html>',
+        '<head><meta charset="utf-8"><title>Captured Frames</title></head>',
+        '<body>',
+        f'<h1>Captured Frames for {rendered_html_path.name}</h1>',
+    ]
+
+    for index, frame in enumerate(frames, start=1):
+        frame_url = frame.url
+        frame_name = frame.name
+        sections.append(
+            f'<section data-frame-index="{index}">'
+            f'<h2>Frame {index}</h2>'
+            f'<p><strong>Name:</strong> {frame_name}</p>'
+            f'<p><strong>URL:</strong> {frame_url}</p>'
+        )
+        try:
+            frame_html = await frame.content()
+            sections.append('<pre>')
+            sections.append(
+                frame_html
+                .replace('&', '&amp;')
+                .replace('<', '&lt;')
+                .replace('>', '&gt;')
+            )
+            sections.append('</pre>')
+        except (OSError, RuntimeError, PlaywrightTimeoutError) as e:
+            sections.append(f'<p><strong>Error:</strong> {e}</p>')
+        sections.append('</section>')
+
+    sections.extend(['</body>', '</html>'])
+
+    try:
+        frames_path.write_text('\n'.join(sections), encoding='utf-8')
+        print(
+            f"[Success] Captured {len(frames)} frame(s) HTML to {frames_path}"
+        )
+    except OSError as e:
+        print(f"[Warning] Failed to save frame HTML: {e}")
+
+
 def generate_llm_result_filename(source_url: str) -> str:
     """
     LLM 응답 JSON 파일명을 생성합니다.
@@ -517,6 +956,183 @@ def save_llm_repair_json_artifact(
     return save_debug_json(LLM_REPAIR_DIR, file_name, payload)
 
 
+def save_llm_error_artifact(
+    source_url: str,
+    *,
+    trace_id: str,
+    attempt: int,
+    max_tokens: int,
+    request_id: str,
+    reason: str,
+    error_message: str,
+    timing: dict[str, Any] | None = None,
+) -> Path | None:
+    """
+    Save timeout/network diagnostics for LLM calls.
+    """
+    payload = {
+        'timestamp': datetime.now(timezone.utc).isoformat(),
+        'source_url': source_url,
+        'trace_id': trace_id,
+        'attempt': attempt,
+        'max_tokens': max_tokens,
+        'request_id': request_id,
+        'reason': reason,
+        'error': error_message,
+        'timing': timing or {},
+    }
+    file_name = f"llm_error_{trace_id}_a{attempt}.json"
+    return save_debug_json(LLM_RAW_RESPONSE_DIR, file_name, payload)
+
+
+def post_chat_completion_with_diagnostics(
+    payload: dict[str, Any],
+    request_id: str,
+    stream: bool = False,
+) -> tuple[int, str, dict[str, float]]:
+    """
+    Call chat completions endpoint with split connect/read timeouts and timings.
+    """
+    parsed = urlparse(LLM_API_URL)
+    if parsed.scheme not in {'http', 'https'} or not parsed.netloc:
+        raise ValueError(f'Invalid llm.api_url: {LLM_API_URL}')
+
+    path = parsed.path or '/'
+    if parsed.query:
+        path = f"{path}?{parsed.query}"
+
+    body_bytes = json.dumps(payload).encode('utf-8')
+    connection_cls = (
+        http.client.HTTPSConnection
+        if parsed.scheme == 'https'
+        else http.client.HTTPConnection
+    )
+
+    t0 = time.perf_counter()
+    conn = connection_cls(parsed.netloc, timeout=LLM_CONNECT_TIMEOUT_SECONDS)
+    try:
+        conn.request(
+            'POST',
+            path,
+            body=body_bytes,
+            headers={
+                'Content-Type': 'application/json',
+                'Accept': 'text/event-stream' if stream else 'application/json',
+                'X-Request-Id': request_id,
+            },
+        )
+        t1 = time.perf_counter()
+
+        if conn.sock is not None:
+            conn.sock.settimeout(LLM_READ_TIMEOUT_SECONDS)
+
+        response = conn.getresponse()
+        t2 = time.perf_counter()
+
+        content_type = (response.getheader('Content-Type') or '').lower()
+        raw_body: bytes
+        first_chunk_seconds: float | None = None
+
+        if stream and 'text/event-stream' in content_type:
+            stream_events: list[dict[str, Any]] = []
+            while True:
+                line_bytes = response.readline()
+                if not line_bytes:
+                    break
+
+                line = line_bytes.decode('utf-8', errors='replace').strip()
+                if not line or not line.startswith('data:'):
+                    continue
+
+                data_text = line[5:].strip()
+                if data_text == '[DONE]':
+                    break
+
+                if first_chunk_seconds is None:
+                    first_chunk_seconds = time.perf_counter() - t1
+
+                try:
+                    stream_events.append(json.loads(data_text))
+                except json.JSONDecodeError:
+                    continue
+
+            raw_body = json.dumps(
+                build_chat_completion_from_stream(stream_events),
+                ensure_ascii=False,
+            ).encode('utf-8')
+        else:
+            raw_body = response.read()
+
+        t3 = time.perf_counter()
+
+        timing = {
+            'connect_and_send_seconds': round(t1 - t0, 3),
+            'ttfb_seconds': round(t2 - t1, 3),
+            'read_body_seconds': round(t3 - t2, 3),
+            'total_seconds': round(t3 - t0, 3),
+        }
+        if first_chunk_seconds is not None:
+            timing['first_stream_chunk_seconds'] = round(first_chunk_seconds, 3)
+        return response.status, raw_body.decode('utf-8', errors='replace'), timing
+    finally:
+        conn.close()
+
+
+def build_chat_completion_from_stream(
+    stream_events: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """
+    Convert OpenAI-compatible stream chunks into a single chat completion payload.
+    """
+    content_parts: list[str] = []
+    finish_reason: str | None = None
+    response_id: str = ''
+    model_name: str = ''
+
+    for event in stream_events:
+        if not isinstance(event, dict):
+            continue
+
+        if not response_id and isinstance(event.get('id'), str):
+            response_id = event['id']
+        if not model_name and isinstance(event.get('model'), str):
+            model_name = event['model']
+
+        choices = event.get('choices')
+        if not isinstance(choices, list) or not choices:
+            continue
+
+        first_choice = choices[0]
+        if not isinstance(first_choice, dict):
+            continue
+
+        delta = first_choice.get('delta')
+        if isinstance(delta, dict):
+            delta_content = delta.get('content')
+            if isinstance(delta_content, str):
+                content_parts.append(delta_content)
+
+        choice_finish_reason = first_choice.get('finish_reason')
+        if isinstance(choice_finish_reason, str) and choice_finish_reason:
+            finish_reason = choice_finish_reason
+
+    return {
+        'id': response_id,
+        'object': 'chat.completion',
+        'model': model_name,
+        'choices': [
+            {
+                'index': 0,
+                'message': {
+                    'role': 'assistant',
+                    'content': ''.join(content_parts),
+                },
+                'finish_reason': finish_reason or 'stop',
+            }
+        ],
+    }
+
+
 def get_first_choice(llm_response: dict[str, Any]) -> dict[str, Any] | None:
     """
     Return the first response choice when available.
@@ -555,6 +1171,7 @@ def call_llm_for_geo_optimization(source_url: str, clean_html_content: str) -> d
     for idx, max_tokens in enumerate(LLM_RETRY_MAX_TOKENS, start=1):
         final_prompt = build_llm_prompt(clean_html_content)
         save_llm_prompt_text(source_url, final_prompt, trace_id=trace_id, attempt=idx)
+        request_id = f"{trace_id}-a{idx}-t{max_tokens}-{uuid.uuid4().hex[:8]}"
 
         payload = {
             'model': LLM_MODEL,
@@ -566,58 +1183,78 @@ def call_llm_for_geo_optimization(source_url: str, clean_html_content: str) -> d
             ],
             'temperature': LLM_TEMPERATURE,
             'max_tokens': max_tokens,
+            'stream': LLM_STREAM_ENABLED,
         }
-        request = Request(
-            LLM_API_URL,
-            data=json.dumps(payload).encode('utf-8'),
-            headers={'Content-Type': 'application/json'},
-            method='POST',
-        )
 
         try:
-            with urlopen(request, timeout=LLM_TIMEOUT_SECONDS) as response:
-                body = response.read().decode('utf-8', errors='replace')
-                response_json = json.loads(body)
-                if isinstance(response_json, dict):
-                    response_json['_trace'] = {
-                        'trace_id': trace_id,
-                        'attempt': idx,
-                        'max_tokens': max_tokens,
-                    }
-
-                first_choice = get_first_choice(response_json) if isinstance(response_json, dict) else None
-                finish_reason = first_choice.get('finish_reason') if first_choice else None
-                if finish_reason == 'length':
-                    save_llm_raw_response_artifact(
-                        source_url,
-                        response_json if isinstance(response_json, dict) else {'raw_body': body},
-                        f'finish_reason_length_a{idx}',
-                        trace_id=trace_id,
-                    )
-                    print(
-                        f"[Warning] LLM response truncated by max_tokens "
-                        f"(attempt={idx}, max_tokens={max_tokens}). Retrying."
-                    )
-                    continue
-
+            status, body, timing = post_chat_completion_with_diagnostics(
+                payload,
+                request_id,
+                stream=LLM_STREAM_ENABLED,
+            )
+            if DEBUG_ENABLED:
                 print(
-                    f"[Success] LLM called: {LLM_API_URL} "
-                    f"(attempt={idx}, max_tokens={max_tokens})"
+                    "[Debug] LLM timing "
+                    f"(attempt={idx}, request_id={request_id}): "
+                    f"connect+send={timing['connect_and_send_seconds']}s, "
+                    f"ttfb={timing['ttfb_seconds']}s, "
+                    f"read={timing['read_body_seconds']}s, "
+                    f"total={timing['total_seconds']}s"
                 )
-                return response_json
-        except HTTPError as e:
-            error_body = e.read().decode('utf-8', errors='replace')
-            save_llm_repair_text_artifact(
-                source_url,
-                f'http_error_a{idx}',
-                error_body,
-                trace_id=trace_id,
-            )
+
+            if status >= 400:
+                save_llm_repair_text_artifact(
+                    source_url,
+                    f'http_error_a{idx}',
+                    body,
+                    trace_id=trace_id,
+                )
+                save_llm_error_artifact(
+                    source_url,
+                    trace_id=trace_id,
+                    attempt=idx,
+                    max_tokens=max_tokens,
+                    request_id=request_id,
+                    reason=f'http_status_{status}',
+                    error_message=body[:2000],
+                    timing=timing,
+                )
+                print(
+                    f"[Warning] LLM API HTTP {status} "
+                    f"(attempt={idx}, request_id={request_id})"
+                )
+                continue
+
+            response_json = json.loads(body)
+            if isinstance(response_json, dict):
+                response_json['_trace'] = {
+                    'trace_id': trace_id,
+                    'attempt': idx,
+                    'max_tokens': max_tokens,
+                    'request_id': request_id,
+                    'timing': timing,
+                }
+
+            first_choice = get_first_choice(response_json) if isinstance(response_json, dict) else None
+            finish_reason = first_choice.get('finish_reason') if first_choice else None
+            if finish_reason == 'length':
+                save_llm_raw_response_artifact(
+                    source_url,
+                    response_json if isinstance(response_json, dict) else {'raw_body': body},
+                    f'finish_reason_length_a{idx}',
+                    trace_id=trace_id,
+                )
+                print(
+                    f"[Warning] LLM response truncated by max_tokens "
+                    f"(attempt={idx}, max_tokens={max_tokens}, request_id={request_id}). Retrying."
+                )
+                continue
+
             print(
-                f"[Warning] LLM API HTTP {e.code} "
-                f"(attempt={idx}): {error_body}"
+                f"[Success] LLM called: {LLM_API_URL} "
+                f"(attempt={idx}, max_tokens={max_tokens}, request_id={request_id})"
             )
-            continue
+            return response_json
         except json.JSONDecodeError as e:
             save_llm_repair_text_artifact(
                 source_url,
@@ -625,15 +1262,50 @@ def call_llm_for_geo_optimization(source_url: str, clean_html_content: str) -> d
                 body if 'body' in locals() else str(e),
                 trace_id=trace_id,
             )
+            save_llm_error_artifact(
+                source_url,
+                trace_id=trace_id,
+                attempt=idx,
+                max_tokens=max_tokens,
+                request_id=request_id,
+                reason='invalid_json',
+                error_message=str(e),
+            )
             print(
                 f"[Warning] LLM call returned invalid JSON "
-                f"(attempt={idx}): {e}"
+                f"(attempt={idx}, request_id={request_id}): {e}"
+            )
+            continue
+        except socket.timeout as e:
+            save_llm_error_artifact(
+                source_url,
+                trace_id=trace_id,
+                attempt=idx,
+                max_tokens=max_tokens,
+                request_id=request_id,
+                reason='socket_timeout',
+                error_message=str(e),
+            )
+            print(
+                f"[Warning] LLM call timed out "
+                f"(attempt={idx}, request_id={request_id}, "
+                f"connect_timeout={LLM_CONNECT_TIMEOUT_SECONDS}s, "
+                f"read_timeout={LLM_READ_TIMEOUT_SECONDS}s): {e}"
             )
             continue
         except OSError as e:
+            save_llm_error_artifact(
+                source_url,
+                trace_id=trace_id,
+                attempt=idx,
+                max_tokens=max_tokens,
+                request_id=request_id,
+                reason='os_error',
+                error_message=str(e),
+            )
             print(
                 f"[Warning] LLM call failed "
-                f"(attempt={idx}): {e}"
+                f"(attempt={idx}, request_id={request_id}): {e}"
             )
             continue
 
@@ -1198,6 +1870,68 @@ def run_pipeline_from_rendered_file(
     print(f"  Enriched HTML Path: {enriched_html_path}")
     print("=" * 60)
 
+
+def run_pipeline_from_preprocessed_file(
+    preprocessed_file: Path,
+    source_url: str | None = None,
+) -> None:
+    """
+    preprocessed HTML 파일을 입력받아 LLM 이후 단계를 실행합니다.
+    (llm -> parse -> save -> inject)
+    """
+    source_url = source_url or infer_source_url_from_filename(preprocessed_file)
+    print(f"[Info] Start preprocessed-to-llm mode for {source_url}")
+
+    preprocessed_html = load_text_file(preprocessed_file)
+    if preprocessed_html is None:
+        return
+
+    print('[Step][Start] Call LLM for GEO optimization')
+    llm_response = call_llm_for_geo_optimization(source_url, preprocessed_html)
+    print(
+        f"[Step][End] Call LLM for GEO optimization: "
+        f"{'success' if llm_response else 'failed'}"
+    )
+    if not llm_response:
+        return
+
+    print('[Step][Start] Parse GEO JSON from LLM response')
+    geo_result_json = extract_geo_json_from_llm_response(
+        llm_response,
+        source_url=source_url,
+    )
+    print(
+        f"[Step][End] Parse GEO JSON from LLM response: "
+        f"{'success' if geo_result_json else 'failed'}"
+    )
+    if not geo_result_json:
+        return
+
+    geo_result_json = filter_geo_result_json_by_config(geo_result_json)
+
+    print('[Step][Start] Save GEO result JSON locally')
+    llm_result_path = save_llm_response_json(source_url, geo_result_json)
+    print(
+        f"[Step][End] Save GEO result JSON locally: "
+        f"{'saved' if llm_result_path else 'skipped_or_failed'}"
+    )
+
+    enriched_html_path, injection_report_path = run_injection_steps(
+        source_url,
+        preprocessed_html,
+        geo_result_json,
+    )
+
+    print("\n" + "=" * 60)
+    print('Preprocessed-to-LLM Complete:')
+    print("=" * 60)
+    print(f"✓ Source URL: {source_url}")
+    print(f"  Preprocessed File: {preprocessed_file}")
+    print(f"  LLM Result JSON Path: {llm_result_path}")
+    print(f"  Injection Report Path: {injection_report_path}")
+    print(f"  Enriched HTML Path: {enriched_html_path}")
+    print("=" * 60)
+
 async def process_url(url: str):
     """
     단일 URL을 처리합니다.
@@ -1208,6 +1942,15 @@ async def process_url(url: str):
     print(f"[Info] Starting render for {url}")
     print(f"[Info] Uploading results to {BUCKET_NAME}")
     print(f"[Info] Playwright goto timeout: {PLAYWRIGHT_GOTO_TIMEOUT_MS}ms")
+    print(f"[Info] Playwright post-load wait: {PLAYWRIGHT_POST_LOAD_WAIT_MS}ms")
+    print(f"[Info] Browser request profile: {BROWSER_REQUEST_PROFILE}")
+    print(f"[Info] Browser diagnostics enabled: {BROWSER_DIAGNOSTICS_ENABLED}")
+    print(f"[Info] Browser render diagnostics save: {BROWSER_SAVE_RENDER_DIAGNOSTICS}")
+    print(f"[Info] Browser capture shadow DOM: {BROWSER_CAPTURE_SHADOW_DOM}")
+    print(f"[Info] Browser capture frames HTML: {BROWSER_CAPTURE_FRAMES_HTML}")
+    print(f"[Info] Browser auto-scroll enabled: {BROWSER_AUTO_SCROLL_ENABLED}")
+    print(f"[Info] Browser service workers: {BROWSER_SERVICE_WORKERS}")
+    print(f"[Info] Browser block third-party domains: {BROWSER_BLOCK_THIRD_PARTY_DOMAINS}")
     print(f"[Info] File save enabled: {SAVE_TO_FILE}")
     if SAVE_TO_FILE:
         print(f"[Info] Saving rendered HTML to {RENDERED_HTML_DIR}")
@@ -1218,8 +1961,10 @@ async def process_url(url: str):
     
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(user_agent=USER_AGENT)
+        context = await browser.new_context(**build_browser_context_options())
+        await attach_domain_request_filter(context, url)
         page = await context.new_page()
+        attach_browser_diagnostics(page)
         
         try:
             print('[Step][Start] Render page with Playwright')
@@ -1237,6 +1982,8 @@ async def process_url(url: str):
                     f"[Step][End] Save rendered HTML locally: "
                     f"{'saved' if rendered_html_path else 'skipped_or_failed'}"
                 )
+                await save_render_diagnostics(page, rendered_html_path)
+                await save_frames_html(page, rendered_html_path)
 
                 print('[Step][Start] Upload rendered HTML to object storage')
                 public_url = upload_to_object_storage(url, html)
@@ -1359,6 +2106,79 @@ async def process_url(url: str):
         finally:
             await browser.close()
 
+
+async def process_url_render_upload_only(url: str):
+    """
+    Render a URL with Playwright, save the rendered HTML locally, upload it to
+    object storage, then stop before preprocessor/LLM/injection steps.
+    """
+    print(f"[Info] Starting render/upload-only mode for {url}")
+    print(f"[Info] Uploading results to {BUCKET_NAME}")
+    print(f"[Info] Playwright goto timeout: {PLAYWRIGHT_GOTO_TIMEOUT_MS}ms")
+    print(f"[Info] Playwright post-load wait: {PLAYWRIGHT_POST_LOAD_WAIT_MS}ms")
+    print(f"[Info] Browser request profile: {BROWSER_REQUEST_PROFILE}")
+    print(f"[Info] Browser diagnostics enabled: {BROWSER_DIAGNOSTICS_ENABLED}")
+    print(f"[Info] Browser render diagnostics save: {BROWSER_SAVE_RENDER_DIAGNOSTICS}")
+    print(f"[Info] Browser capture shadow DOM: {BROWSER_CAPTURE_SHADOW_DOM}")
+    print(f"[Info] Browser capture frames HTML: {BROWSER_CAPTURE_FRAMES_HTML}")
+    print(f"[Info] Browser auto-scroll enabled: {BROWSER_AUTO_SCROLL_ENABLED}")
+    print(f"[Info] Browser service workers: {BROWSER_SERVICE_WORKERS}")
+    print(f"[Info] Browser block third-party domains: {BROWSER_BLOCK_THIRD_PARTY_DOMAINS}")
+    print(f"[Info] File save enabled: {SAVE_TO_FILE}")
+    if SAVE_TO_FILE:
+        print(f"[Info] Saving rendered HTML to {RENDERED_HTML_DIR}")
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        context = await browser.new_context(**build_browser_context_options())
+        await attach_domain_request_filter(context, url)
+        page = await context.new_page()
+        attach_browser_diagnostics(page)
+
+        try:
+            print('[Step][Start] Render page with Playwright')
+            html = await fetch_and_render_html(
+                page,
+                url,
+                timeout_ms=PLAYWRIGHT_GOTO_TIMEOUT_MS,
+            )
+            print(f"[Step][End] Render page with Playwright: {'success' if html else 'failed'}")
+
+            if not html:
+                print("\n" + "=" * 60)
+                print("Render/Upload-Only Failed:")
+                print("=" * 60)
+                print(f"✗ {url}")
+                print("=" * 60)
+                return
+
+            print('[Step][Start] Save rendered HTML locally')
+            rendered_html_path = save_rendered_html(url, html)
+            print(
+                f"[Step][End] Save rendered HTML locally: "
+                f"{'saved' if rendered_html_path else 'skipped_or_failed'}"
+            )
+            await save_render_diagnostics(page, rendered_html_path)
+            await save_frames_html(page, rendered_html_path)
+
+            print('[Step][Start] Upload rendered HTML to object storage')
+            public_url = upload_to_object_storage(url, html)
+            print(
+                f"[Step][End] Upload rendered HTML to object storage: "
+                f"{'success' if public_url else 'failed'}"
+            )
+
+            print("\n" + "=" * 60)
+            print("Render/Upload-Only Complete:")
+            print("=" * 60)
+            print(f"✓ {url}")
+            print(f"  Rendered HTML Path: {rendered_html_path}")
+            print(f"  Public URL: {public_url}")
+            print(f"  Size: {len(html):,} bytes")
+            print("=" * 60)
+        finally:
+            await browser.close()
+
 # 실행 진입점
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
@@ -1370,12 +2190,21 @@ if __name__ == "__main__":
         help='Target URL for full pipeline mode (e.g. https://www.samsung.com/uk/)',
     )
     parser.add_argument(
+        '--render-upload-only',
+        action='store_true',
+        help='Render target URL, upload HTML to object storage, then stop.',
+    )
+    parser.add_argument(
         '--rendered-html-file',
         help='Rendered HTML file name/path to resume from post-render steps.',
     )
     parser.add_argument(
         '--preprocessed-file',
         help='Preprocessed HTML file name/path for injection-only mode.',
+    )
+    parser.add_argument(
+        '--preprocessed-for-llm-file',
+        help='Preprocessed HTML file name/path to run from LLM stage.',
     )
     parser.add_argument(
         '--llm-response-file',
@@ -1387,15 +2216,60 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    # Mode 1: full pipeline by target URL
-    if args.target_url and not args.rendered_html_file and not args.preprocessed_file and not args.llm_response_file:
+    # Mode 1: render and upload only by target URL
+    if (
+        args.target_url
+        and args.render_upload_only
+        and not args.rendered_html_file
+        and not args.preprocessed_file
+        and not args.preprocessed_for_llm_file
+        and not args.llm_response_file
+    ):
+        asyncio.run(process_url_render_upload_only(args.target_url))
+    # Mode 2: full pipeline by target URL
+    elif (
+        args.target_url
+        and not args.render_upload_only
+        and not args.rendered_html_file
+        and not args.preprocessed_file
+        and not args.preprocessed_for_llm_file
+        and not args.llm_response_file
+    ):
         asyncio.run(process_url(args.target_url))
-    # Mode 2: resume from rendered HTML file
-    elif args.rendered_html_file and not args.preprocessed_file and not args.llm_response_file:
+    # Mode 3: resume from rendered HTML file
+    elif (
+        args.rendered_html_file
+        and not args.render_upload_only
+        and not args.preprocessed_file
+        and not args.preprocessed_for_llm_file
+        and not args.llm_response_file
+        and not args.target_url
+    ):
         rendered_path = resolve_input_file(args.rendered_html_file, RENDERED_HTML_DIR)
         run_pipeline_from_rendered_file(rendered_path, args.source_url)
-    # Mode 3: injection-only from preprocessed + llm files
-    elif args.preprocessed_file and args.llm_response_file and not args.rendered_html_file:
+    # Mode 4: run from preprocessed HTML at LLM stage
+    elif (
+        args.preprocessed_for_llm_file
+        and not args.render_upload_only
+        and not args.rendered_html_file
+        and not args.preprocessed_file
+        and not args.llm_response_file
+        and not args.target_url
+    ):
+        preprocessed_path = resolve_input_file(
+            args.preprocessed_for_llm_file,
+            PREPROCESSOR_RESULT_DIR,
+        )
+        run_pipeline_from_preprocessed_file(preprocessed_path, args.source_url)
+    # Mode 5: injection-only from preprocessed + llm files
+    elif (
+        args.preprocessed_file
+        and args.llm_response_file
+        and not args.render_upload_only
+        and not args.rendered_html_file
+        and not args.preprocessed_for_llm_file
+        and not args.target_url
+    ):
         preprocessed_path = resolve_input_file(args.preprocessed_file, PREPROCESSOR_RESULT_DIR)
         llm_path = resolve_input_file(args.llm_response_file, LLM_RESULT_DIR)
         run_pipeline_from_preprocessed_and_llm_files(
@@ -1406,8 +2280,10 @@ if __name__ == "__main__":
     else:
         parser.error(
             'Invalid arguments. Use one of: '\
-            '(1) target_url, '\
-            '(2) --rendered-html-file <file>, '\
-            '(3) --preprocessed-file <file> --llm-response-file <file>'
+            '(1) --render-upload-only target_url, '\
+            '(2) target_url, '\
+            '(3) --rendered-html-file <file>, '\
+            '(4) --preprocessed-for-llm-file <file>, '\
+            '(5) --preprocessed-file <file> --llm-response-file <file>'
         )
  

@@ -189,9 +189,24 @@ playwright install chromium
 
 ## 6. 실행 방법
 
-`main.py`는 3가지 실행 모드를 지원합니다.
+`main.py`는 5가지 실행 모드를 지원합니다.
 
-### 6.1 전체 파이프라인 모드 (기본)
+### 6.1 Render/Upload-Only 모드
+
+웹페이지 렌더링과 Object Storage 업로드까지만 실행하고 종료합니다.
+
+- Playwright로 URL 렌더링
+- 렌더링 HTML 로컬 저장
+- Object Storage에 `public-read` 업로드
+- 선처리기/LLM/주입 단계는 실행하지 않음
+
+```bash
+cd /Users/hyoon/Projects/geo-analyzer
+source .venv/bin/activate
+python main.py --render-upload-only https://www.koreanair.com
+```
+
+### 6.2 전체 파이프라인 모드 (기본)
 
 URL 렌더링부터 주입까지 전체 단계를 실행합니다.
 
@@ -201,7 +216,7 @@ source .venv/bin/activate
 python main.py https://www.lg.com/us/
 ```
 
-### 6.2 Rendered HTML 이후 재개 모드
+### 6.3 Rendered HTML 이후 재개 모드
 
 이미 저장된 rendered HTML 파일을 입력받아, 아래 단계만 실행합니다.
 
@@ -220,7 +235,7 @@ python main.py \
 - 필요 시 절대경로도 사용할 수 있습니다.
 - `--source-url`을 주지 않으면 파일명에서 도메인을 자동 유추합니다.
 
-### 6.3 Injection-Only 모드 (Preprocessed + LLM Response)
+### 6.4 Injection-Only 모드 (Preprocessed + LLM Response)
 
 `preprocessed` HTML과 `llm response` JSON 파일만으로 주입 절차를 실행합니다.
 
@@ -242,10 +257,33 @@ python main.py \
   - 순수 GEO JSON (`structural_audit`, `enriched_meta`, `json_ld` 포함)
   - Chat Completions envelope (`choices[0].message.content` 포함)
 
-### 6.4 인자 조합 규칙
+### 6.5 Preprocessed -> LLM 모드
 
+이미 확보된 `preprocessed` HTML 파일로 LLM 호출부터 실행합니다.
+
+- LLM 호출/파싱
+- GEO JSON 저장
+- Structural Audit/Meta/JSON-LD/RAG 주입
+- Injection Report 저장
+- Enriched HTML 저장
+
+```bash
+python main.py \
+  --preprocessed-for-llm-file preprocessor_response_www_lg_com_e3ddaf47_20260511_155744.html \
+  --source-url https://www.lg.com/us/
+```
+
+참고:
+- 파일명을 상대경로로 넣으면 `output.preprocessor_subdir` 기준으로 찾습니다.
+- 필요 시 절대경로도 사용할 수 있습니다.
+- `--source-url`을 주지 않으면 파일명에서 도메인을 자동 유추합니다.
+
+### 6.6 인자 조합 규칙
+
+- render/upload-only 모드: `--render-upload-only target_url` 전달
 - 전체 모드: `target_url`만 전달
 - post-render 모드: `--rendered-html-file`만 전달
+- preprocessed->LLM 모드: `--preprocessed-for-llm-file`만 전달
 - injection-only 모드: `--preprocessed-file` + `--llm-response-file` 함께 전달
 - 위 조합을 벗어나면 argparse 에러로 종료
 
