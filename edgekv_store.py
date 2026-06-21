@@ -14,7 +14,7 @@ from page_type_registry import resolve_page_type
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / 'config.properties'
 DEFAULT_EDGEKV_API_PATH_TEMPLATE = (
-    '/edgekv/v1/namespaces/{namespace}/groups/{group_id}/items/{item_id}'
+    '/edgekv/v1/networks/{network}/namespaces/{namespace}/groups/{group_id}/items/{item_id}'
 )
 
 
@@ -200,6 +200,7 @@ class EdgeKVClient:
 
     def item_url(self, item_id: str) -> str:
         path = DEFAULT_EDGEKV_API_PATH_TEMPLATE.format(
+            network=quote(self.settings.network, safe=''),
             namespace=quote(self.settings.namespace, safe=''),
             group_id=quote(self.settings.group_id, safe=''),
             item_id=quote(item_id, safe=''),
