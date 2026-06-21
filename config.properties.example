@@ -87,6 +87,9 @@ redis.dead_letter_queue_name=Queue:GEO:DeadLetter
 redis.lock_prefix=Lock:GEO:Analysis
 redis.lock_ttl_seconds=3600
 redis.brpop_timeout_seconds=5
+redis.socket_timeout_seconds=30
+redis.socket_connect_timeout_seconds=10
+redis.health_check_interval_seconds=30
 redis.max_attempts=3
 redis.result_prefix=GEO:Result
 

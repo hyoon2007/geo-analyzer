@@ -95,6 +95,10 @@ redis.failed_queue_name=Queue:GEO:Failed
 redis.dead_letter_queue_name=Queue:GEO:DeadLetter
 redis.lock_prefix=Lock:GEO:Analysis
 redis.lock_ttl_seconds=3600
+redis.brpop_timeout_seconds=5
+redis.socket_timeout_seconds=30
+redis.socket_connect_timeout_seconds=10
+redis.health_check_interval_seconds=30
 
 enqueue_bridge.host=0.0.0.0
 enqueue_bridge.port=8080
@@ -103,6 +107,9 @@ enqueue_bridge.auth_token=<strong-token>
 customer.id=default
 customer.page_types_path=customer_page_types.json
 ```
+
+`redis.brpop_timeout_seconds`는 큐가 비었을 때 worker가 정상적으로 깨어나는 polling 주기입니다.
+`redis.socket_timeout_seconds`는 Redis 응답 자체를 기다리는 client read timeout이므로, 항상 `brpop_timeout_seconds`보다 충분히 길게 둡니다.
 
 ## 6. EdgeKV 설정
 

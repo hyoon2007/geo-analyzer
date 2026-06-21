@@ -7,6 +7,8 @@ import uuid
 from datetime import datetime, timezone
 
 from playwright.async_api import async_playwright
+from redis.exceptions import ConnectionError as RedisConnectionError
+from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from main import process_url_with_browser
 from redis_queue import RedisGeoQueue, create_queue_from_config
@@ -131,7 +133,26 @@ async def worker_loop(*, once: bool = False) -> None:
 
         try:
             while not shutdown_event.is_set():
-                task = await queue.dequeue()
+                try:
+                    task = await queue.dequeue()
+                except (RedisTimeoutError, RedisConnectionError) as exc:
+                    print(
+                        f"[Worker][Redis][Warning] Dequeue failed: "
+                        f"{type(exc).__name__}: {exc}. Reconnecting..."
+                    )
+                    try:
+                        await queue.close()
+                    except Exception as close_exc:
+                        print(
+                            f"[Worker][Redis][Warning] Close failed during reconnect: "
+                            f"{type(close_exc).__name__}: {close_exc}"
+                        )
+                    await asyncio.sleep(2)
+                    queue = create_queue_from_config()
+                    await queue.initialize()
+                    print('[Worker][Redis] Reconnected.')
+                    continue
+
                 if task is None:
                     if once:
                         print('[Worker][Once] No task available.')

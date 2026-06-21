@@ -68,6 +68,9 @@ class RedisQueueSettings:
     lock_prefix: str
     lock_ttl_seconds: int
     brpop_timeout_seconds: int
+    socket_timeout_seconds: int
+    socket_connect_timeout_seconds: int
+    health_check_interval_seconds: int
     max_attempts: int
     result_prefix: str
 
@@ -114,6 +117,30 @@ class RedisQueueSettings:
             brpop_timeout_seconds=int(
                 get_setting(properties, 'GEO_REDIS_BRPOP_TIMEOUT_SECONDS', 'redis.brpop_timeout_seconds', '5')
             ),
+            socket_timeout_seconds=int(
+                get_setting(
+                    properties,
+                    'GEO_REDIS_SOCKET_TIMEOUT_SECONDS',
+                    'redis.socket_timeout_seconds',
+                    '30',
+                )
+            ),
+            socket_connect_timeout_seconds=int(
+                get_setting(
+                    properties,
+                    'GEO_REDIS_SOCKET_CONNECT_TIMEOUT_SECONDS',
+                    'redis.socket_connect_timeout_seconds',
+                    '10',
+                )
+            ),
+            health_check_interval_seconds=int(
+                get_setting(
+                    properties,
+                    'GEO_REDIS_HEALTH_CHECK_INTERVAL_SECONDS',
+                    'redis.health_check_interval_seconds',
+                    '30',
+                )
+            ),
             max_attempts=int(
                 get_setting(properties, 'GEO_REDIS_MAX_ATTEMPTS', 'redis.max_attempts', '3')
             ),
@@ -135,6 +162,13 @@ class RedisGeoQueue:
             password=settings.password,
             db=settings.db,
             decode_responses=True,
+            socket_timeout=max(
+                settings.socket_timeout_seconds,
+                settings.brpop_timeout_seconds + 10,
+            ),
+            socket_connect_timeout=settings.socket_connect_timeout_seconds,
+            socket_keepalive=True,
+            health_check_interval=settings.health_check_interval_seconds,
         )
         self._release_sha: str | None = None
         self._extend_sha: str | None = None
