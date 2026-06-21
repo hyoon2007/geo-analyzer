@@ -44,7 +44,7 @@ source .venv/bin/activate
 ### 3.3 의존성 설치
 
 ```bash
-pip install boto3 playwright
+pip install -r requirements.txt
 playwright install chromium
 ```
 
@@ -112,6 +112,92 @@ playwright install chromium
 - RAG TL;DR 가시 주입 토글: `rag.injection_enabled=true|false` (기본 false)
 - RAG TL;DR 주입 위치: `rag.injection_target=main|article|body` (기본 main)
 - RAG TL;DR 최대 길이: `rag.tldr_max_chars=700`
+
+### 4.7 파이프라인 레이어 토글
+
+아래 설정으로 full pipeline 내 주요 레이어를 켜고 끌 수 있습니다.
+
+```properties
+pipeline.preprocessor_enabled=true
+pipeline.llm_enabled=true
+pipeline.injection_enabled=true
+```
+
+- `pipeline.preprocessor_enabled=false`: 렌더링 HTML 저장 및 Object Storage 업로드 후 종료
+- `pipeline.llm_enabled=false`: 선처리기 응답 저장 후 LLM 호출 전 종료
+- `pipeline.injection_enabled=false`: GEO JSON 저장 후 HTML 주입 단계만 skip
+
+의존 관계상 preprocessor가 꺼져 있으면 LLM/injection 입력이 없으므로 뒤 단계는 실행되지 않습니다. LLM이 꺼져 있으면 injection에 필요한 GEO JSON이 없으므로 injection도 실행되지 않습니다.
+
+### 4.8 Akamai EdgeKV 저장 설정
+
+파이프라인에서 최종으로 사용할 HTML을 Akamai EdgeKV에 저장할 수 있습니다.
+LLM과 injection이 모두 켜져 있으면 enriched HTML을 저장하고, LLM 또는 injection이 꺼져 있으면 렌더링된 HTML을 저장합니다.
+preprocessed 파일에서 시작하는 파일 기반 모드처럼 rendered HTML이 없는 경우에는 입력 HTML을 저장합니다.
+
+```properties
+edgekv.enabled=false
+edgekv.namespace=geo_opt_data
+edgekv.group_id=url_metadata
+edgekv.network=production
+edgekv.edgerc_path=~/.edgerc
+edgekv.edgerc_section=default
+edgekv.timeout_seconds=30
+edgekv.data_version=2.0
+```
+
+`edgekv.enabled=true`일 때만 저장을 수행합니다. Akamai EdgeGrid credential은 `edgekv.edgerc_path`와 `edgekv.edgerc_section`으로 지정하며, 기본값은 `~/.edgerc`의 `[default]` section입니다.
+
+EdgeKV payload는 `design/edgeKV-data-schema.json` 기준으로 다음 필드만 저장합니다.
+
+```json
+{
+  "version": "2.0",
+  "updated_at": "2026-06-21T06:00:00Z",
+  "ttl_seconds": 86400,
+  "expires_at": "2026-06-22T06:00:00Z",
+  "html": "<!DOCTYPE html><html>..."
+}
+```
+
+`ttl_seconds`는 EdgeKV 설정에서 직접 정의하지 않고, 고객별 page type 정의에서 결정합니다.
+
+```properties
+customer.id=default
+customer.page_types_path=customer_page_types.json
+```
+
+`customer_page_types.json`에서 고객별 기본 TTL과 page type별 TTL을 정의합니다.
+
+```json
+{
+  "default_customer_id": "default",
+  "customers": {
+    "default": {
+      "default_ttl_seconds": 86400,
+      "page_types": [
+        {
+          "name": "flight_status",
+          "ttl_seconds": 300,
+          "patterns": ["*/flight-status*"]
+        }
+      ]
+    }
+  }
+}
+```
+
+URL은 `host + path + ?query`와 `path + ?query` 양쪽을 glob pattern으로 매칭합니다. 먼저 매칭되는 page type의 TTL을 사용하고, 매칭되는 page type이 없으면 해당 customer의 `default_ttl_seconds`를 사용합니다.
+
+EdgeKV item key는 `host + path + ?query` 문자열을 UTF-8 bytes로 변환한 뒤 base64url 인코딩하고 `=` padding을 제거한 다음 `k` prefix를 붙입니다.
+
+예:
+
+```text
+https://www.example.com/a/b?x=1
+key source: www.example.com/a/b?x=1
+edgekv key: k<base64url-without-padding>
+```
 
 ## 5. 핵심 구현 포인트
 
@@ -287,7 +373,146 @@ python main.py \
 - injection-only 모드: `--preprocessed-file` + `--llm-response-file` 함께 전달
 - 위 조합을 벗어나면 argparse 에러로 종료
 
-## 7. 산출물 위치
+## 7. Redis Queue Worker 실행
+
+`worker.py`는 Redis list 큐를 `BRPOP`으로 감시하는 상주형 워커입니다.
+큐에서 request를 dequeue하면 `main.py`의 full pipeline을 실행하고, 완료/실패 여부와 관계없이 `finally`에서 Redis lock을 안전하게 해제합니다.
+
+아래 명령은 모두 프로젝트 루트(`/Users/hyoon/Projects/geo-analyzer`)에서 실행합니다.
+`samples/` 디렉터리 안에서 실행 중이면 먼저 루트로 이동합니다.
+
+```bash
+cd /Users/hyoon/Projects/geo-analyzer
+source .venv/bin/activate
+
+# 필요 시 환경변수로 Redis 설정 override
+export GEO_REDIS_HOST=172.235.215.18
+export GEO_REDIS_PORT=6379
+export GEO_REDIS_PASSWORD=GEO_SYSTEM_STRONG_SECRET_AUTH_KEY
+export GEO_REDIS_QUEUE_NAME=Queue:GEO:Tasks
+export GEO_REDIS_FAILED_QUEUE_NAME=Queue:GEO:Failed
+export GEO_REDIS_DEAD_LETTER_QUEUE_NAME=Queue:GEO:DeadLetter
+
+python worker.py
+```
+
+### 7.1 작업 enqueue
+
+운영용 enqueue 스크립트는 `prod_enqueue.py`입니다.
+URL을 입력값으로 받아 Redis lock을 먼저 잡고, 중복 URL이 처리 중이면 큐에 넣지 않습니다.
+
+```bash
+python prod_enqueue.py 'https://www.samsung.com/uk/'
+```
+
+priority 메타데이터를 지정하려면:
+
+```bash
+python prod_enqueue.py 'https://www.samsung.com/uk/' --priority 1
+```
+
+enqueue payload 형식:
+
+```json
+{
+  "request_id": "...",
+  "url": "https://www.samsung.com/uk/",
+  "mode": "full",
+  "priority": 1,
+  "token": "...",
+  "attempts": 0,
+  "enqueued_at": "..."
+}
+```
+
+같은 URL을 연속 enqueue하면 lock 때문에 두 번째 요청은 skip됩니다.
+
+```text
+Skipped: lock already exists for https://www.samsung.com/uk/
+```
+
+`samples/` 디렉터리에서 실행해야 하는 경우에는 상대경로를 사용합니다.
+
+```bash
+../.venv/bin/python ../prod_enqueue.py 'https://www.samsung.com/uk/'
+```
+
+### 7.2 Worker 실행
+
+한 건만 처리하고 종료하려면:
+
+```bash
+python worker.py --once
+```
+
+enqueue 후 한 건만 처리하는 테스트 흐름:
+
+```bash
+python prod_enqueue.py 'https://www.samsung.com/uk/'
+python worker.py --once
+```
+
+상주형으로 계속 대기하려면:
+
+```bash
+python worker.py
+```
+
+### 7.3 HTTP Enqueue Bridge 실행
+
+Redis TCP에 직접 접속할 수 없는 호출자는 `enqueue_bridge.py` HTTP API를 통해 enqueue할 수 있습니다.
+
+```bash
+export GEO_ENQUEUE_BRIDGE_AUTH_TOKEN=change-me
+python enqueue_bridge.py
+```
+
+기본 endpoint:
+
+```http
+POST /geo/offline/enqueue
+Authorization: Bearer <token>
+Content-Type: application/json
+```
+
+curl 예시:
+
+```bash
+curl -X POST http://127.0.0.1:8080/geo/offline/enqueue \
+  -H 'Authorization: Bearer change-me' \
+  -H 'Content-Type: application/json' \
+  -d '{"url":"https://www.samsung.com/uk/","priority":1}'
+```
+
+성공 시 `202 Accepted`, 동일 URL lock이 이미 있으면 `409 Conflict`를 반환합니다.
+
+상태 확인:
+
+```bash
+curl http://127.0.0.1:8080/healthz
+curl http://127.0.0.1:8080/readyz
+```
+
+Kubernetes 운영에서는 HTTPS를 앱에서 직접 처리하기보다 Ingress/API Gateway에서 TLS를 종료하고, Bridge는 내부 HTTP service로 운영하는 것을 권장합니다.
+
+### 7.4 Redis 샘플 테스트
+
+enqueue/dequeue와 distributed lock 동작 테스트는 아래 샘플을 참고합니다.
+
+```bash
+python samples/redis_geo_test.py producer
+python samples/redis_geo_test.py consumer
+python samples/redis_geo_test.py locks
+```
+
+기본 큐 이름:
+
+- 작업 큐: `Queue:GEO:Tasks`
+- 실패 큐: `Queue:GEO:Failed`
+- 데드레터 큐: `Queue:GEO:DeadLetter`
+- 락 prefix: `Lock:GEO:Analysis`
+
+## 8. 산출물 위치
 
 로컬 디렉터리: `output.base_dir` (기본 `/Users/hyoon/Projects/geo-log`)
 
@@ -300,9 +525,9 @@ python main.py \
 - `injection_report/injection_report_<...>.json`: 주입 결과 리포트
 - `enriched_html/enriched_<...>.html`: 최종 반영된 enriched HTML
 
-## 8. 로그 정리 및 정책
+## 9. 로그 정리 및 정책
 
-### 8.1 자동 정리 스크립트
+### 9.1 자동 정리 스크립트
 
 `purge_logs.sh`를 사용하여 불필요한 로그 파일을 안전하게 삭제할 수 있습니다.
 
@@ -351,28 +576,28 @@ python main.py \
   ./purge_logs.sh --days 30 --all --confirm >> /tmp/purge.log 2>&1
 ```
 
-## 9. 동작 확인 체크리스트
+## 10. 동작 확인 체크리스트
 
 1. Object Storage 업로드 성공 로그 확인
 2. 선처리기 호출 성공 로그 확인
 3. `GEO result JSON saved to ...` 로그 확인
 4. `llm_result_<...>.json` 파일 열어 JSON object 형태 확인
 
-## 10. 트러블슈팅
+## 11. 트러블슈팅
 
-### 10.1 LLM 400 context length 오류
+### 11.1 LLM 400 context length 오류
 
 - 증상: `maximum context length is 8192 tokens`
 - 대응: 이미 `LLM_RETRY_MAX_TOKENS` 재시도 로직 적용됨
 - 추가 대응: `llm.retry_max_tokens` 값을 더 낮춤
 
-### 10.2 LLM 응답이 JSON이 아닌 경우
+### 11.2 LLM 응답이 JSON이 아닌 경우
 
 - 증상: 파싱 실패 로그 출력
 - 대응: 내장된 JSON 복구 단계가 자동 실행
 - 그래도 실패하면 프롬프트를 더 엄격히 줄이거나 HTML 길이를 추가 축소
 
-### 10.4 `--llm-response-file` 파싱 실패
+### 11.4 `--llm-response-file` 파싱 실패
 
 - 증상: `Failed to read JSON file` 또는 `Expecting property name enclosed in double quotes`
 - 원인: JSON 파일에 스마트 따옴표(`“ ”`) 또는 미이스케이프 쌍따옴표가 포함됨
@@ -381,7 +606,7 @@ python main.py \
   2. 스마트 따옴표를 ASCII 따옴표(`"`)로 치환
   3. 문자열 내부 `"`가 필요한 위치(예: `39\"`)는 이스케이프 처리
 
-### 10.3 Object Storage 업로드 실패
+### 11.3 Object Storage 업로드 실패
 
 확인 항목:
 
@@ -389,7 +614,7 @@ python main.py \
 2. Bucket/Endpoint/Region 값 일치
 3. 네트워크 접근 가능 여부
 
-## 11. 보안 권장사항
+## 12. 보안 권장사항
 
 현재 코드는 빠른 검증을 위해 키가 코드에 포함되어 있습니다. 운영 전 아래 방식으로 변경을 권장합니다.
 

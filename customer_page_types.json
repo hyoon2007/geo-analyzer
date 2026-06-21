@@ -1,0 +1,25 @@
+{
+  "default_customer_id": "default",
+  "customers": {
+    "default": {
+      "default_ttl_seconds": 86400,
+      "page_types": [
+        {
+          "name": "flight_status",
+          "ttl_seconds": 300,
+          "patterns": ["*/flight-status*"]
+        },
+        {
+          "name": "booking",
+          "ttl_seconds": 900,
+          "patterns": ["*/booking*"]
+        },
+        {
+          "name": "content",
+          "ttl_seconds": 604800,
+          "patterns": ["*/contents/*"]
+        }
+      ]
+    }
+  }
+}

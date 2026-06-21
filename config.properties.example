@@ -50,6 +50,11 @@ output.injection_report_subdir=injection_report
 # Debug mode
 debug.enabled=true
 
+# Pipeline layer switches
+pipeline.preprocessor_enabled=true
+pipeline.llm_enabled=true
+pipeline.injection_enabled=true
+
 # Playwright
 playwright.goto_timeout_ms=60000
 playwright.post_load_wait_ms=0
@@ -70,3 +75,36 @@ browser.block_third_party_domains=false
 browser.primary_domain_override=
 # Optional comma-separated allowlist for required CDN/API domains.
 browser.allowed_extra_domains=
+
+# Redis worker queue
+redis.host=your-redis-host
+redis.port=6379
+redis.password=your-redis-password
+redis.db=0
+redis.queue_name=Queue:GEO:Tasks
+redis.failed_queue_name=Queue:GEO:Failed
+redis.dead_letter_queue_name=Queue:GEO:DeadLetter
+redis.lock_prefix=Lock:GEO:Analysis
+redis.lock_ttl_seconds=3600
+redis.brpop_timeout_seconds=5
+redis.max_attempts=3
+redis.result_prefix=GEO:Result
+
+# HTTP enqueue bridge
+enqueue_bridge.host=0.0.0.0
+enqueue_bridge.port=8080
+enqueue_bridge.auth_token=change-me
+
+# Akamai EdgeKV publish
+edgekv.enabled=false
+edgekv.namespace=geo_opt_data
+edgekv.group_id=url_metadata
+edgekv.network=production
+edgekv.edgerc_path=~/.edgerc
+edgekv.edgerc_section=default
+edgekv.timeout_seconds=30
+edgekv.data_version=2.0
+
+# Customer/page type registry
+customer.id=default
+customer.page_types_path=customer_page_types.json

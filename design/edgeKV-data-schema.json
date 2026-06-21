@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "GEO_EdgeKV_TTL_Enriched_HTML_Schema",
+  "type": "object",
+  "required": ["version", "updated_at", "ttl_seconds", "expires_at", "html"],
+  "properties": {
+    "version": {
+      "type": "string",
+      "description": "오프라인 LLM 분석 모델 및 프롬프트 스펙 버전",
+      "example": "2.0"
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "오프라인 파이프라인에서 데이터를 생성하고 쓰기 백을 완료한 시간 (UTC)",
+      "example": "2026-06-21T06:00:00Z"
+    },
+    "ttl_seconds": {
+      "type": "integer",
+      "description": "해당 페이지 타입에 할당된 유효 수명 주기 (초 단위)",
+      "example": 86400
+    },
+    "expires_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "데이터가 만료되는 절대 시간 타임스탬프 (updated_at + ttl_seconds, UTC)",
+      "example": "2026-06-22T06:00:00Z"
+    },
+    "html": {
+      "type": "string",
+      "description": "노이즈가 제거되고 고품질 JSON-LD 및 Meta Tag 주입이 완료된 HTML 전체 스트링",
+      "example": "<!DOCTYPE html><html><head>..."
+    }
+  }
+}

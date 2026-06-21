@@ -18,6 +18,7 @@ import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 
+from edgekv_store import publish_edgekv_item
 from utils.html_injection import inject_llm_results_to_html, save_injection_report
 
 
@@ -87,9 +88,16 @@ PREPROCESSOR_PATH = require_property(PROPERTIES, 'preprocessor.path')
 
 LLM_API_URL = require_property(PROPERTIES, 'llm.api_url')
 DEBUG_ENABLED = parse_bool(PROPERTIES.get('debug.enabled', 'true'))
+PIPELINE_PREPROCESSOR_ENABLED = parse_bool(
+    PROPERTIES.get('pipeline.preprocessor_enabled', 'true'),
+)
+PIPELINE_LLM_ENABLED = parse_bool(PROPERTIES.get('pipeline.llm_enabled', 'true'))
+PIPELINE_INJECTION_ENABLED = parse_bool(
+    PROPERTIES.get('pipeline.injection_enabled', 'true'),
+)
 PLAYWRIGHT_GOTO_TIMEOUT_MS = int(PROPERTIES.get('playwright.goto_timeout_ms', '60000'))
 PLAYWRIGHT_POST_LOAD_WAIT_MS = int(PROPERTIES.get('playwright.post_load_wait_ms', '0'))
-BROWSER_REQUEST_PROFILE = PROPERTIES.get('browser.request_profile', 'default').lower()
+BROWSER_REQUEST_PROFILE = PROPERTIES.get('browser.request_profile', 'default').strip().lower()
 BROWSER_DIAGNOSTICS_ENABLED = parse_bool(
     PROPERTIES.get('browser.diagnostics_enabled', 'false'),
 )
@@ -1700,6 +1708,38 @@ def filter_geo_result_json_by_config(geo_result_json: dict[str, Any]) -> dict[st
     return filtered
 
 
+def publish_final_html_to_edgekv(
+    *,
+    source_url: str,
+    final_html: str,
+    html_source: str,
+    geo_result_json: dict[str, Any] | None = None,
+    injection_report: dict[str, Any] | None = None,
+) -> None:
+    """
+    현재 파이프라인 상태에서 최종으로 사용할 HTML을 EdgeKV에 저장합니다.
+    EdgeKV 설정이 꺼져 있으면 no-op입니다.
+    """
+    print(f'[Step][Start] Publish {html_source} HTML to Akamai EdgeKV')
+    try:
+        edgekv_result = publish_edgekv_item(
+            source_url=source_url,
+            enriched_html=final_html,
+            geo_result_json=geo_result_json or {},
+            injection_report=injection_report or {'html_source': html_source},
+        )
+        if edgekv_result is None:
+            print(f'[Step][End] Publish {html_source} HTML to Akamai EdgeKV: disabled')
+        else:
+            print(
+                f'[Step][End] Publish {html_source} HTML to Akamai EdgeKV: '
+                f"success item_id={edgekv_result['item_id']}"
+            )
+    except Exception as e:
+        print(f'[Step][End] Publish {html_source} HTML to Akamai EdgeKV: failed ({e})')
+        raise
+
+
 def run_injection_steps(
     source_url: str,
     preprocessed_html: str,
@@ -1708,6 +1748,10 @@ def run_injection_steps(
     """
     preprocessed HTML + GEO JSON으로 주입 및 결과 저장을 수행합니다.
     """
+    if not PIPELINE_INJECTION_ENABLED:
+        print('[Info] Pipeline injection layer is disabled. Skip injection steps.')
+        return None, None
+
     print('[Step][Start] Inject GEO result into HTML')
     enriched_html, injection_report = inject_llm_results_to_html(
         source_url,
@@ -1740,6 +1784,15 @@ def run_injection_steps(
         f"[Step][End] Save enriched HTML locally: "
         f"{'saved' if enriched_html_path else 'skipped_or_failed'}"
     )
+
+    publish_final_html_to_edgekv(
+        source_url=source_url,
+        final_html=enriched_html,
+        html_source='enriched',
+        geo_result_json=geo_result_json,
+        injection_report=injection_report,
+    )
+
     return enriched_html_path, injection_report_path
 
 
@@ -1767,11 +1820,21 @@ def run_pipeline_from_preprocessed_and_llm_files(
         print('[Error] Unable to normalize LLM response to GEO JSON.')
         return
 
-    _, injection_report_path = run_injection_steps(
-        source_url,
-        preprocessed_html,
-        geo_result_json,
-    )
+    if not PIPELINE_INJECTION_ENABLED:
+        print('[Info] Pipeline injection layer is disabled. Publish input HTML.')
+        publish_final_html_to_edgekv(
+            source_url=source_url,
+            final_html=preprocessed_html,
+            html_source='input',
+            geo_result_json=geo_result_json,
+        )
+        injection_report_path = None
+    else:
+        _, injection_report_path = run_injection_steps(
+            source_url,
+            preprocessed_html,
+            geo_result_json,
+        )
 
     print("\n" + "=" * 60)
     print('Injection-Only Complete:')
@@ -1807,6 +1870,15 @@ def run_pipeline_from_rendered_file(
     if not public_url:
         return
 
+    if not PIPELINE_PREPROCESSOR_ENABLED:
+        print('[Info] Pipeline preprocessor layer is disabled. Stop after upload.')
+        publish_final_html_to_edgekv(
+            source_url=source_url,
+            final_html=rendered_html,
+            html_source='rendered',
+        )
+        return
+
     print('[Step][Start] Call preprocessor')
     preprocessed_html = fetch_preprocessor_html(public_url)
     print(
@@ -1822,6 +1894,15 @@ def run_pipeline_from_rendered_file(
         f"[Step][End] Save preprocessor response locally: "
         f"{'saved' if preprocessor_response_path else 'skipped_or_failed'}"
     )
+
+    if not PIPELINE_LLM_ENABLED:
+        print('[Info] Pipeline LLM optimization layer is disabled. Stop after preprocessor.')
+        publish_final_html_to_edgekv(
+            source_url=source_url,
+            final_html=rendered_html,
+            html_source='rendered',
+        )
+        return
 
     print('[Step][Start] Call LLM for GEO optimization')
     llm_response = call_llm_for_geo_optimization(source_url, preprocessed_html)
@@ -1853,11 +1934,22 @@ def run_pipeline_from_rendered_file(
         f"{'saved' if llm_result_path else 'skipped_or_failed'}"
     )
 
-    enriched_html_path, injection_report_path = run_injection_steps(
-        source_url,
-        preprocessed_html,
-        geo_result_json,
-    )
+    if not PIPELINE_INJECTION_ENABLED:
+        print('[Info] Pipeline injection layer is disabled. Publish rendered HTML.')
+        publish_final_html_to_edgekv(
+            source_url=source_url,
+            final_html=rendered_html,
+            html_source='rendered',
+            geo_result_json=geo_result_json,
+        )
+        enriched_html_path = None
+        injection_report_path = None
+    else:
+        enriched_html_path, injection_report_path = run_injection_steps(
+            source_url,
+            preprocessed_html,
+            geo_result_json,
+        )
 
     print("\n" + "=" * 60)
     print('Post-Render Complete:')
@@ -1886,6 +1978,15 @@ def run_pipeline_from_preprocessed_file(
     if preprocessed_html is None:
         return
 
+    if not PIPELINE_LLM_ENABLED:
+        print('[Info] Pipeline LLM optimization layer is disabled. Stop before LLM.')
+        publish_final_html_to_edgekv(
+            source_url=source_url,
+            final_html=preprocessed_html,
+            html_source='input',
+        )
+        return
+
     print('[Step][Start] Call LLM for GEO optimization')
     llm_response = call_llm_for_geo_optimization(source_url, preprocessed_html)
     print(
@@ -1916,11 +2017,22 @@ def run_pipeline_from_preprocessed_file(
         f"{'saved' if llm_result_path else 'skipped_or_failed'}"
     )
 
-    enriched_html_path, injection_report_path = run_injection_steps(
-        source_url,
-        preprocessed_html,
-        geo_result_json,
-    )
+    if not PIPELINE_INJECTION_ENABLED:
+        print('[Info] Pipeline injection layer is disabled. Publish input HTML.')
+        publish_final_html_to_edgekv(
+            source_url=source_url,
+            final_html=preprocessed_html,
+            html_source='input',
+            geo_result_json=geo_result_json,
+        )
+        enriched_html_path = None
+        injection_report_path = None
+    else:
+        enriched_html_path, injection_report_path = run_injection_steps(
+            source_url,
+            preprocessed_html,
+            geo_result_json,
+        )
 
     print("\n" + "=" * 60)
     print('Preprocessed-to-LLM Complete:')
@@ -1931,6 +2043,171 @@ def run_pipeline_from_preprocessed_file(
     print(f"  Injection Report Path: {injection_report_path}")
     print(f"  Enriched HTML Path: {enriched_html_path}")
     print("=" * 60)
+
+
+async def process_url_with_browser(browser, url: str) -> None:
+    """
+    Run the full pipeline using an already-launched Playwright browser.
+    This is intended for resident workers that reuse Chromium across tasks.
+    """
+    print(f"[Info] Starting render for {url}")
+    print(f"[Info] Uploading results to {BUCKET_NAME}")
+    print(f"[Info] Playwright goto timeout: {PLAYWRIGHT_GOTO_TIMEOUT_MS}ms")
+    print(f"[Info] Playwright post-load wait: {PLAYWRIGHT_POST_LOAD_WAIT_MS}ms")
+    print(f"[Info] Browser request profile: {BROWSER_REQUEST_PROFILE}")
+    print(f"[Info] Browser diagnostics enabled: {BROWSER_DIAGNOSTICS_ENABLED}")
+    print(f"[Info] Browser render diagnostics save: {BROWSER_SAVE_RENDER_DIAGNOSTICS}")
+    print(f"[Info] Browser capture shadow DOM: {BROWSER_CAPTURE_SHADOW_DOM}")
+    print(f"[Info] Browser capture frames HTML: {BROWSER_CAPTURE_FRAMES_HTML}")
+    print(f"[Info] Browser auto-scroll enabled: {BROWSER_AUTO_SCROLL_ENABLED}")
+    print(f"[Info] Browser service workers: {BROWSER_SERVICE_WORKERS}")
+    print(f"[Info] Browser block third-party domains: {BROWSER_BLOCK_THIRD_PARTY_DOMAINS}")
+    print(f"[Info] Pipeline preprocessor enabled: {PIPELINE_PREPROCESSOR_ENABLED}")
+    print(f"[Info] Pipeline LLM enabled: {PIPELINE_LLM_ENABLED}")
+    print(f"[Info] Pipeline injection enabled: {PIPELINE_INJECTION_ENABLED}")
+    print(f"[Info] File save enabled: {SAVE_TO_FILE}")
+    if SAVE_TO_FILE:
+        print(f"[Info] Saving rendered HTML to {RENDERED_HTML_DIR}")
+        print(f"[Info] Saving preprocessor results to {PREPROCESSOR_RESULT_DIR}")
+        print(f"[Info] Saving LLM prompts to {LLM_PROMPT_DIR}")
+        print(f"[Info] Saving LLM results to {LLM_RESULT_DIR}")
+    print(f"[Info] LLM API endpoint: {LLM_API_URL}")
+
+    context = await browser.new_context(**build_browser_context_options())
+    await attach_domain_request_filter(context, url)
+    page = await context.new_page()
+    attach_browser_diagnostics(page)
+
+    try:
+        print('[Step][Start] Render page with Playwright')
+        html = await fetch_and_render_html(
+            page,
+            url,
+            timeout_ms=PLAYWRIGHT_GOTO_TIMEOUT_MS,
+        )
+        print(f"[Step][End] Render page with Playwright: {'success' if html else 'failed'}")
+
+        if not html:
+            raise RuntimeError(f'Failed to render URL: {url}')
+
+        print('[Step][Start] Save rendered HTML locally')
+        rendered_html_path = save_rendered_html(url, html)
+        print(
+            f"[Step][End] Save rendered HTML locally: "
+            f"{'saved' if rendered_html_path else 'skipped_or_failed'}"
+        )
+        await save_render_diagnostics(page, rendered_html_path)
+        await save_frames_html(page, rendered_html_path)
+
+        print('[Step][Start] Upload rendered HTML to object storage')
+        public_url = upload_to_object_storage(url, html)
+        print(
+            f"[Step][End] Upload rendered HTML to object storage: "
+            f"{'success' if public_url else 'failed'}"
+        )
+        if not public_url:
+            raise RuntimeError(f'Failed to upload rendered HTML for URL: {url}')
+
+        if not PIPELINE_PREPROCESSOR_ENABLED:
+            print('[Info] Pipeline preprocessor layer is disabled. Stop after upload.')
+            publish_final_html_to_edgekv(
+                source_url=url,
+                final_html=html,
+                html_source='rendered',
+            )
+            return
+
+        print('[Step][Start] Call preprocessor')
+        preprocessed_html = await asyncio.to_thread(fetch_preprocessor_html, public_url)
+        print(
+            f"[Step][End] Call preprocessor: "
+            f"{'success' if preprocessed_html else 'failed'}"
+        )
+        if not preprocessed_html:
+            raise RuntimeError(f'Failed to preprocess URL: {url}')
+
+        print('[Step][Start] Save preprocessor response locally')
+        preprocessor_response_path = save_preprocessor_result(url, preprocessed_html)
+        print(
+            f"[Step][End] Save preprocessor response locally: "
+            f"{'saved' if preprocessor_response_path else 'skipped_or_failed'}"
+        )
+
+        if not PIPELINE_LLM_ENABLED:
+            print('[Info] Pipeline LLM optimization layer is disabled. Stop after preprocessor.')
+            publish_final_html_to_edgekv(
+                source_url=url,
+                final_html=html,
+                html_source='rendered',
+            )
+            return
+
+        print('[Step][Start] Call LLM for GEO optimization')
+        llm_response = await asyncio.to_thread(
+            call_llm_for_geo_optimization,
+            url,
+            preprocessed_html,
+        )
+        print(
+            f"[Step][End] Call LLM for GEO optimization: "
+            f"{'success' if llm_response else 'failed'}"
+        )
+        if not llm_response:
+            raise RuntimeError(f'Failed to call LLM for URL: {url}')
+
+        print('[Step][Start] Parse GEO JSON from LLM response')
+        geo_result_json = extract_geo_json_from_llm_response(
+            llm_response,
+            source_url=url,
+        )
+        print(
+            f"[Step][End] Parse GEO JSON from LLM response: "
+            f"{'success' if geo_result_json else 'failed'}"
+        )
+        if not geo_result_json:
+            raise RuntimeError(f'Failed to parse GEO JSON for URL: {url}')
+
+        geo_result_json = filter_geo_result_json_by_config(geo_result_json)
+
+        print('[Step][Start] Save GEO result JSON locally')
+        llm_result_path = save_llm_response_json(url, geo_result_json)
+        print(
+            f"[Step][End] Save GEO result JSON locally: "
+            f"{'saved' if llm_result_path else 'skipped_or_failed'}"
+        )
+
+        if not PIPELINE_INJECTION_ENABLED:
+            print('[Info] Pipeline injection layer is disabled. Publish rendered HTML.')
+            publish_final_html_to_edgekv(
+                source_url=url,
+                final_html=html,
+                html_source='rendered',
+                geo_result_json=geo_result_json,
+            )
+            enriched_html_path = None
+            injection_report_path = None
+        else:
+            enriched_html_path, injection_report_path = run_injection_steps(
+                url,
+                preprocessed_html,
+                geo_result_json,
+            )
+
+        print("\n" + "=" * 60)
+        print("Processing Complete:")
+        print("=" * 60)
+        print(f"✓ {url}")
+        print(f"  Rendered HTML Path: {rendered_html_path}")
+        print(f"  Preprocessor Response Path: {preprocessor_response_path}")
+        print(f"  LLM Result JSON Path: {llm_result_path}")
+        print(f"  Injection Report Path: {injection_report_path}")
+        print(f"  Enriched HTML Path: {enriched_html_path}")
+        print(f"  Size: {len(html):,} bytes")
+        print("=" * 60)
+    finally:
+        await page.close()
+        await context.close()
+
 
 async def process_url(url: str):
     """
@@ -1951,6 +2228,9 @@ async def process_url(url: str):
     print(f"[Info] Browser auto-scroll enabled: {BROWSER_AUTO_SCROLL_ENABLED}")
     print(f"[Info] Browser service workers: {BROWSER_SERVICE_WORKERS}")
     print(f"[Info] Browser block third-party domains: {BROWSER_BLOCK_THIRD_PARTY_DOMAINS}")
+    print(f"[Info] Pipeline preprocessor enabled: {PIPELINE_PREPROCESSOR_ENABLED}")
+    print(f"[Info] Pipeline LLM enabled: {PIPELINE_LLM_ENABLED}")
+    print(f"[Info] Pipeline injection enabled: {PIPELINE_INJECTION_ENABLED}")
     print(f"[Info] File save enabled: {SAVE_TO_FILE}")
     if SAVE_TO_FILE:
         print(f"[Info] Saving rendered HTML to {RENDERED_HTML_DIR}")
@@ -1995,7 +2275,14 @@ async def process_url(url: str):
                 preprocessor_response_path = None
                 llm_result_path = None
                 enriched_html_path = None
-                if public_url:
+                if public_url and not PIPELINE_PREPROCESSOR_ENABLED:
+                    print('[Info] Pipeline preprocessor layer is disabled. Stop after upload.')
+                    publish_final_html_to_edgekv(
+                        source_url=url,
+                        final_html=html,
+                        html_source='rendered',
+                    )
+                elif public_url:
                     print('[Step][Start] Call preprocessor')
                     preprocessed_html = await asyncio.to_thread(
                         fetch_preprocessor_html,
@@ -2017,75 +2304,62 @@ async def process_url(url: str):
                             f"{'saved' if preprocessor_response_path else 'skipped_or_failed'}"
                         )
 
-                        print('[Step][Start] Call LLM for GEO optimization')
-                        llm_response = await asyncio.to_thread(
-                            call_llm_for_geo_optimization,
-                            url,
-                            preprocessed_html,
-                        )
-                        print(
-                            f"[Step][End] Call LLM for GEO optimization: "
-                            f"{'success' if llm_response else 'failed'}"
-                        )
-
-                        if llm_response:
-                            print('[Step][Start] Parse GEO JSON from LLM response')
-                            geo_result_json = extract_geo_json_from_llm_response(
-                                llm_response,
+                        if not PIPELINE_LLM_ENABLED:
+                            print('[Info] Pipeline LLM optimization layer is disabled. Stop after preprocessor.')
+                            publish_final_html_to_edgekv(
                                 source_url=url,
+                                final_html=html,
+                                html_source='rendered',
+                            )
+                        else:
+                            print('[Step][Start] Call LLM for GEO optimization')
+                            llm_response = await asyncio.to_thread(
+                                call_llm_for_geo_optimization,
+                                url,
+                                preprocessed_html,
                             )
                             print(
-                                f"[Step][End] Parse GEO JSON from LLM response: "
-                                f"{'success' if geo_result_json else 'failed'}"
+                                f"[Step][End] Call LLM for GEO optimization: "
+                                f"{'success' if llm_response else 'failed'}"
                             )
 
-                            if geo_result_json:
-                                geo_result_json = filter_geo_result_json_by_config(geo_result_json)
-                                print('[Step][Start] Save GEO result JSON locally')
-                                llm_result_path = save_llm_response_json(
-                                    url,
-                                    geo_result_json,
+                            if llm_response:
+                                print('[Step][Start] Parse GEO JSON from LLM response')
+                                geo_result_json = extract_geo_json_from_llm_response(
+                                    llm_response,
+                                    source_url=url,
                                 )
                                 print(
-                                    f"[Step][End] Save GEO result JSON locally: "
-                                    f"{'saved' if llm_result_path else 'skipped_or_failed'}"
+                                    f"[Step][End] Parse GEO JSON from LLM response: "
+                                    f"{'success' if geo_result_json else 'failed'}"
                                 )
 
-                                print('[Step][Start] Inject GEO result into HTML')
-                                enriched_html, injection_report = inject_llm_results_to_html(
-                                    url,
-                                    preprocessed_html,
-                                    geo_result_json,
-                                    rag_injection_enabled=RAG_INJECTION_ENABLED,
-                                    rag_injection_target=RAG_INJECTION_TARGET,
-                                    rag_tldr_max_chars=RAG_TLDR_MAX_CHARS,
-                                    debug=DEBUG_ENABLED,
-                                )
-                                print('[Step][End] Inject GEO result into HTML: success')
+                                if geo_result_json:
+                                    geo_result_json = filter_geo_result_json_by_config(geo_result_json)
+                                    print('[Step][Start] Save GEO result JSON locally')
+                                    llm_result_path = save_llm_response_json(
+                                        url,
+                                        geo_result_json,
+                                    )
+                                    print(
+                                        f"[Step][End] Save GEO result JSON locally: "
+                                        f"{'saved' if llm_result_path else 'skipped_or_failed'}"
+                                    )
 
-                                print('[Step][Start] Save injection report locally')
-                                domain_hash = hashlib.md5(url.encode()).hexdigest()[:8]
-                                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                                injection_report_path = save_injection_report(
-                                    injection_report,
-                                    INJECTION_REPORT_DIR,
-                                    domain=f"{urlparse(url).netloc.replace('.', '_')}_{domain_hash}",
-                                    timestamp=timestamp,
-                                )
-                                print(
-                                    f"[Step][End] Save injection report locally: "
-                                    f"{'saved' if injection_report_path else 'skipped_or_failed'}"
-                                )
-
-                                print('[Step][Start] Save enriched HTML locally')
-                                enriched_html_path = save_enriched_html(
-                                    url,
-                                    enriched_html,
-                                )
-                                print(
-                                    f"[Step][End] Save enriched HTML locally: "
-                                    f"{'saved' if enriched_html_path else 'skipped_or_failed'}"
-                                )
+                                    if not PIPELINE_INJECTION_ENABLED:
+                                        print('[Info] Pipeline injection layer is disabled. Publish rendered HTML.')
+                                        publish_final_html_to_edgekv(
+                                            source_url=url,
+                                            final_html=html,
+                                            html_source='rendered',
+                                            geo_result_json=geo_result_json,
+                                        )
+                                    else:
+                                        enriched_html_path, _ = run_injection_steps(
+                                            url,
+                                            preprocessed_html,
+                                            geo_result_json,
+                                        )
 
                 print("\n" + "="*60)
                 print("Processing Complete:")
@@ -2167,6 +2441,12 @@ async def process_url_render_upload_only(url: str):
                 f"[Step][End] Upload rendered HTML to object storage: "
                 f"{'success' if public_url else 'failed'}"
             )
+            if public_url:
+                publish_final_html_to_edgekv(
+                    source_url=url,
+                    final_html=html,
+                    html_source='rendered',
+                )
 
             print("\n" + "=" * 60)
             print("Render/Upload-Only Complete:")
