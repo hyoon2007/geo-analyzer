@@ -97,6 +97,7 @@ redis.result_prefix=GEO:Result
 enqueue_bridge.host=0.0.0.0
 enqueue_bridge.port=8080
 enqueue_bridge.auth_token=change-me
+enqueue_bridge.log_file=logs/enqueue_bridge.log
 
 # Akamai EdgeKV publish
 edgekv.enabled=false

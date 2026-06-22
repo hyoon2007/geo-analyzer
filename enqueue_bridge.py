@@ -1,6 +1,10 @@
 import argparse
 import hmac
+import json
+import logging
+import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -9,12 +13,18 @@ from redis.exceptions import RedisError
 
 from redis_queue import RedisGeoQueue, create_queue_from_config, get_setting, load_properties
 
+BASE_DIR = Path(__file__).resolve().parent
+DEFAULT_LOG_FILE = BASE_DIR / 'logs' / 'enqueue_bridge.log'
+LOGGER_NAME = 'enqueue_bridge'
+logger = logging.getLogger(LOGGER_NAME)
+
 
 @dataclass(frozen=True)
 class EnqueueBridgeSettings:
     host: str
     port: int
     auth_token: str
+    log_file: str
 
     @classmethod
     def from_env_and_properties(cls) -> 'EnqueueBridgeSettings':
@@ -40,7 +50,117 @@ class EnqueueBridgeSettings:
                 'enqueue_bridge.auth_token',
                 '',
             ),
+            log_file=get_setting(
+                properties,
+                'GEO_ENQUEUE_BRIDGE_LOG_FILE',
+                'enqueue_bridge.log_file',
+                str(DEFAULT_LOG_FILE),
+            ),
         )
+
+
+def configure_logging(log_file: str) -> None:
+    log_path = Path(log_file).expanduser()
+    if not log_path.is_absolute():
+        log_path = BASE_DIR / log_path
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+
+    resolved_log_path = log_path.resolve()
+    for handler in logger.handlers:
+        if (
+            isinstance(handler, logging.FileHandler)
+            and Path(handler.baseFilename).resolve() == resolved_log_path
+        ):
+            return
+
+    for handler in list(logger.handlers):
+        if isinstance(handler, logging.FileHandler):
+            logger.removeHandler(handler)
+            handler.close()
+
+    handler = logging.FileHandler(resolved_log_path, encoding='utf-8')
+    handler.setFormatter(
+        logging.Formatter('%(asctime)s %(levelname)s [%(name)s] %(message)s')
+    )
+    logger.addHandler(handler)
+
+
+def response_json_payload(response: web.StreamResponse) -> dict[str, Any]:
+    if not isinstance(response, web.Response):
+        return {}
+    if response.content_type != 'application/json' or not response.text:
+        return {}
+    try:
+        payload = json.loads(response.text)
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def response_error_message(response: web.StreamResponse) -> str:
+    payload = response_json_payload(response)
+    for key in ('message', 'status', 'detail'):
+        value = payload.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return response.reason or ''
+
+
+@web.middleware
+async def request_logging_middleware(
+    request: web.Request,
+    handler: Any,
+) -> web.StreamResponse:
+    started_at = time.monotonic()
+    method = request.method
+    path = request.rel_url.path_qs
+    remote = request.remote or '-'
+    user_agent = request.headers.get('User-Agent', '-')
+
+    try:
+        response = await handler(request)
+    except Exception as exc:
+        elapsed_ms = (time.monotonic() - started_at) * 1000
+        logger.exception(
+            "error method=%s path=%r status=500 remote=%s duration_ms=%.2f "
+            "message=%r",
+            method,
+            path,
+            remote,
+            elapsed_ms,
+            str(exc),
+        )
+        raise
+
+    elapsed_ms = (time.monotonic() - started_at) * 1000
+    status = response.status
+    logger.info(
+        "access method=%s path=%r status=%s remote=%s duration_ms=%.2f "
+        "user_agent=%r",
+        method,
+        path,
+        status,
+        remote,
+        elapsed_ms,
+        user_agent,
+    )
+
+    if status >= 400:
+        logger.error(
+            "error method=%s path=%r status=%s remote=%s duration_ms=%.2f "
+            "message=%r",
+            method,
+            path,
+            status,
+            remote,
+            elapsed_ms,
+            response_error_message(response),
+        )
+
+    return response
 
 
 def json_response(payload: dict[str, Any], status: int) -> web.Response:
@@ -206,6 +326,13 @@ async def on_startup(app: web.Application) -> None:
     await queue.initialize()
     app['queue'] = queue
     settings = app['settings']
+    logger.info(
+        'startup host=%s port=%s queue=%s log_file=%s',
+        settings.host,
+        settings.port,
+        queue.settings.queue_name,
+        settings.log_file,
+    )
     print(
         f"[Bridge][Init] Listening on {settings.host}:{settings.port}; "
         f"queue={queue.settings.queue_name}"
@@ -216,12 +343,15 @@ async def on_cleanup(app: web.Application) -> None:
     queue = app.get('queue')
     if queue is not None:
         await queue.close()
+        logger.info('shutdown Redis connection closed')
         print('[Bridge][Shutdown] Redis connection closed.')
 
 
 def create_app(settings: EnqueueBridgeSettings | None = None) -> web.Application:
-    app = web.Application()
-    app['settings'] = settings or EnqueueBridgeSettings.from_env_and_properties()
+    app_settings = settings or EnqueueBridgeSettings.from_env_and_properties()
+    configure_logging(app_settings.log_file)
+    app = web.Application(middlewares=[request_logging_middleware])
+    app['settings'] = app_settings
     app.router.add_get('/healthz', handle_healthz)
     app.router.add_get('/readyz', handle_readyz)
     app.router.add_post('/geo/offline/enqueue', handle_enqueue)
@@ -245,12 +375,14 @@ def main() -> None:
             host=args.host,
             port=settings.port,
             auth_token=settings.auth_token,
+            log_file=settings.log_file,
         )
     if args.port:
         settings = EnqueueBridgeSettings(
             host=settings.host,
             port=args.port,
             auth_token=settings.auth_token,
+            log_file=settings.log_file,
         )
 
     if not settings.auth_token:
@@ -258,7 +390,12 @@ def main() -> None:
             'enqueue_bridge.auth_token or GEO_ENQUEUE_BRIDGE_AUTH_TOKEN is required.'
         )
 
-    web.run_app(create_app(settings), host=settings.host, port=settings.port)
+    web.run_app(
+        create_app(settings),
+        host=settings.host,
+        port=settings.port,
+        access_log=None,
+    )
 
 
 if __name__ == '__main__':
