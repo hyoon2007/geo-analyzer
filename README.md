@@ -156,9 +156,21 @@ EdgeKV payload는 `design/edgeKV-data-schema.json` 기준으로 다음 필드만
   "updated_at": "2026-06-21T06:00:00Z",
   "ttl_seconds": 86400,
   "expires_at": "2026-06-22T06:00:00Z",
-  "html": "<!DOCTYPE html><html>..."
+  "html_encoding": "gzip+base64",
+  "content_type": "text/html; charset=utf-8",
+  "content_encoding": "gzip",
+  "html_original_bytes": 1530000,
+  "html_stored_bytes": 320000,
+  "edgekv_payload_bytes": 321200,
+  "edgekv_plain_payload_bytes": 1531200,
+  "edgekv_gzip_payload_bytes": 321100,
+  "html": "H4sIA..."
 }
 ```
+
+HTML은 EdgeKV에 PUT되는 최종 JSON byte 크기를 기준으로 저장 방식을 선택합니다.
+기본적으로 gzip 압축 후 base64 인코딩한 `gzip+base64`가 더 작으면 이 방식을 사용하고, 아주 작은 HTML처럼 원문 저장이 더 작으면 `html_encoding=identity`로 저장합니다.
+EdgeWorkers에서 `gzip+base64` payload를 응답할 때는 base64 decode 결과를 압축 body로 그대로 전달하고 `Content-Encoding: gzip`, `Content-Type`, `Vary: Accept-Encoding`을 설정해야 합니다.
 
 `ttl_seconds`는 EdgeKV 설정에서 직접 정의하지 않고, 고객별 page type 정의에서 결정합니다.
 

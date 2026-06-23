@@ -1,0 +1,20 @@
+# 네트워크 및 인프라 보안 구성
+bind 0.0.0.0
+port 6379
+protected-mode yes
+requirepass GEO_SYSTEM_STRONG_SECRET_AUTH_KEY  # 실시간 에지 및 오프라인 상주 워커 인증 키
+
+# 1. 커널 메모리 관리 및 강제 축출 정책 제어 (가장 중요)
+maxmemory 4gb  # 물리 가용한 메모리의 60~70% 선에서 안전 한계선 지정
+maxmemory-policy noeviction  # 한계 도달 시 락/큐 강제 삭제를 전면 차단하고 에러를 반환하여 데이터 신뢰성 절대 사수
+
+# 2. 지속성(Persistence) 및 디스크 동기화 전략
+# Hot Path 극단적 초저지연 레이턴시 방어를 위해 무거운 RDB 스냅샷을 끄고 경량화 비동기 AOF를 가동합니다.
+save ""  # RDB 스냅샷 완전 비활성화 (I/O 블로킹 유발 지점 제거)
+appendonly yes
+appendfsync everysec  # 디스크 쓰기 오버헤드를 줄이기 위해 1초 단위 비동기 덤프 구성 (최대 유실 한계 1초 보장)
+
+# 3. 인프라 커넥션 튜닝
+timeout 0
+tcp-keepalive 300
+maxclients 10000

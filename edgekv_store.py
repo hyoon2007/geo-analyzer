@@ -1,5 +1,6 @@
 import base64
 import configparser
+import gzip
 import json
 import os
 from dataclasses import dataclass
@@ -16,6 +17,8 @@ CONFIG_PATH = BASE_DIR / 'config.properties'
 DEFAULT_EDGEKV_API_PATH_TEMPLATE = (
     '/edgekv/v1/networks/{network}/namespaces/{namespace}/groups/{group_id}/items/{item_id}'
 )
+EDGEKV_SAFE_PAYLOAD_BYTES = 900 * 1024
+HTML_CONTENT_TYPE = 'text/html; charset=utf-8'
 
 
 def load_properties(config_path: Path = CONFIG_PATH) -> dict[str, str]:
@@ -136,6 +139,112 @@ def utc_timestamp(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).isoformat().replace('+00:00', 'Z')
 
 
+def json_payload_size(payload: dict[str, Any]) -> int:
+    return len(json.dumps(payload, ensure_ascii=False).encode('utf-8'))
+
+
+def gzip_base64_text(value: str) -> str:
+    compressed = gzip.compress(value.encode('utf-8'), mtime=0)
+    return base64.b64encode(compressed).decode('ascii')
+
+
+def stabilize_payload_sizes(
+    plain_payload: dict[str, Any],
+    gzip_payload: dict[str, Any],
+) -> None:
+    for payload in (plain_payload, gzip_payload):
+        payload['edgekv_payload_bytes'] = 0
+        payload['edgekv_plain_payload_bytes'] = 0
+        payload['edgekv_gzip_payload_bytes'] = 0
+
+    while True:
+        plain_payload_bytes = json_payload_size(plain_payload)
+        gzip_payload_bytes = json_payload_size(gzip_payload)
+        changed = False
+
+        for payload, payload_bytes in (
+            (plain_payload, plain_payload_bytes),
+            (gzip_payload, gzip_payload_bytes),
+        ):
+            updates = {
+                'edgekv_payload_bytes': payload_bytes,
+                'edgekv_plain_payload_bytes': plain_payload_bytes,
+                'edgekv_gzip_payload_bytes': gzip_payload_bytes,
+            }
+            for key, value in updates.items():
+                if payload[key] != value:
+                    payload[key] = value
+                    changed = True
+
+        if not changed:
+            return
+
+
+def build_payload_with_html(
+    *,
+    base_payload: dict[str, Any],
+    html: str,
+    html_encoding: str,
+) -> dict[str, Any]:
+    html_bytes = html.encode('utf-8')
+    payload = {
+        **base_payload,
+        'html_encoding': html_encoding,
+        'content_type': HTML_CONTENT_TYPE,
+        'html_original_bytes': len(html_bytes),
+    }
+
+    if html_encoding == 'identity':
+        payload['html'] = html
+        payload['html_stored_bytes'] = len(html_bytes)
+        return payload
+
+    if html_encoding == 'gzip+base64':
+        encoded_html = gzip_base64_text(html)
+        payload['content_encoding'] = 'gzip'
+        payload['html'] = encoded_html
+        payload['html_stored_bytes'] = len(encoded_html.encode('ascii'))
+        return payload
+
+    raise ValueError(f'Unsupported html_encoding: {html_encoding}')
+
+
+def choose_edgekv_html_payload(
+    *,
+    base_payload: dict[str, Any],
+    html: str,
+) -> dict[str, Any]:
+    plain_payload = build_payload_with_html(
+        base_payload=base_payload,
+        html=html,
+        html_encoding='identity',
+    )
+    gzip_payload = build_payload_with_html(
+        base_payload=base_payload,
+        html=html,
+        html_encoding='gzip+base64',
+    )
+
+    stabilize_payload_sizes(plain_payload, gzip_payload)
+
+    if gzip_payload['edgekv_payload_bytes'] < plain_payload['edgekv_payload_bytes']:
+        selected_payload = gzip_payload
+    else:
+        selected_payload = plain_payload
+
+    selected_payload_bytes = selected_payload['edgekv_payload_bytes']
+    if selected_payload_bytes > EDGEKV_SAFE_PAYLOAD_BYTES:
+        raise ValueError(
+            'EdgeKV payload exceeds safe size limit after HTML encoding: '
+            f'payload_bytes={selected_payload_bytes}, '
+            f'safe_limit_bytes={EDGEKV_SAFE_PAYLOAD_BYTES}, '
+            f'html_encoding={selected_payload["html_encoding"]}, '
+            f'html_original_bytes={selected_payload["html_original_bytes"]}'
+        )
+
+    return selected_payload
+
+
 def load_edgerc(path: Path, section: str) -> dict[str, str]:
     parser = configparser.ConfigParser()
     read_files = parser.read(path)
@@ -166,13 +275,13 @@ def build_edgekv_payload(
     page_type_match = resolve_page_type(source_url)
     ttl_seconds = page_type_match.ttl_seconds
     expires_at = updated_at + timedelta(seconds=ttl_seconds)
-    return {
+    base_payload = {
         'version': settings.data_version,
         'updated_at': utc_timestamp(updated_at),
         'ttl_seconds': ttl_seconds,
         'expires_at': utc_timestamp(expires_at),
-        'html': enriched_html,
     }
+    return choose_edgekv_html_payload(base_payload=base_payload, html=enriched_html)
 
 
 class EdgeKVClient:
@@ -251,4 +360,9 @@ def publish_edgekv_item(
         injection_report=injection_report,
         settings=effective_settings,
     )
-    return EdgeKVClient(effective_settings).put_item(item_id, payload)
+    result = EdgeKVClient(effective_settings).put_item(item_id, payload)
+    result['html_encoding'] = payload.get('html_encoding')
+    result['edgekv_payload_bytes'] = payload.get('edgekv_payload_bytes')
+    result['html_original_bytes'] = payload.get('html_original_bytes')
+    result['html_stored_bytes'] = payload.get('html_stored_bytes')
+    return result

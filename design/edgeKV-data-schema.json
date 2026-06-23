@@ -2,7 +2,20 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "GEO_EdgeKV_TTL_Enriched_HTML_Schema",
   "type": "object",
-  "required": ["version", "updated_at", "ttl_seconds", "expires_at", "html"],
+  "required": [
+    "version",
+    "updated_at",
+    "ttl_seconds",
+    "expires_at",
+    "html_encoding",
+    "content_type",
+    "html_original_bytes",
+    "html_stored_bytes",
+    "edgekv_payload_bytes",
+    "edgekv_plain_payload_bytes",
+    "edgekv_gzip_payload_bytes",
+    "html"
+  ],
   "properties": {
     "version": {
       "type": "string",
@@ -26,10 +39,71 @@
       "description": "데이터가 만료되는 절대 시간 타임스탬프 (updated_at + ttl_seconds, UTC)",
       "example": "2026-06-22T06:00:00Z"
     },
+    "html_encoding": {
+      "type": "string",
+      "enum": ["identity", "gzip+base64"],
+      "description": "html 필드 저장 방식. identity는 원문 HTML, gzip+base64는 gzip 압축 bytes의 base64 문자열",
+      "example": "gzip+base64"
+    },
+    "content_type": {
+      "type": "string",
+      "description": "EdgeWorkers 응답 Content-Type",
+      "example": "text/html; charset=utf-8"
+    },
+    "content_encoding": {
+      "type": "string",
+      "enum": ["gzip"],
+      "description": "gzip+base64 저장 시 EdgeWorkers 응답 Content-Encoding",
+      "example": "gzip"
+    },
+    "html_original_bytes": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "원문 HTML UTF-8 byte 길이",
+      "example": 1530000
+    },
+    "html_stored_bytes": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "html 필드에 저장된 문자열의 byte 길이",
+      "example": 320000
+    },
+    "edgekv_payload_bytes": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "EdgeKV에 PUT되는 최종 JSON payload byte 길이",
+      "example": 321200
+    },
+    "edgekv_plain_payload_bytes": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "원문 HTML 저장 후보의 최종 JSON payload byte 길이",
+      "example": 1531200
+    },
+    "edgekv_gzip_payload_bytes": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "gzip+base64 저장 후보의 최종 JSON payload byte 길이",
+      "example": 321100
+    },
     "html": {
       "type": "string",
-      "description": "노이즈가 제거되고 고품질 JSON-LD 및 Meta Tag 주입이 완료된 HTML 전체 스트링",
-      "example": "<!DOCTYPE html><html><head>..."
+      "description": "html_encoding에 따라 원문 HTML 또는 gzip 압축 bytes의 base64 문자열",
+      "example": "H4sIAAAAA..."
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "html_encoding": {
+            "const": "gzip+base64"
+          }
+        }
+      },
+      "then": {
+        "required": ["content_encoding"]
+      }
+    }
+  ]
 }

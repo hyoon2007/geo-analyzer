@@ -1733,7 +1733,9 @@ def publish_final_html_to_edgekv(
         else:
             print(
                 f'[Step][End] Publish {html_source} HTML to Akamai EdgeKV: '
-                f"success item_id={edgekv_result['item_id']}"
+                f"success item_id={edgekv_result['item_id']} "
+                f"html_encoding={edgekv_result.get('html_encoding')} "
+                f"payload_bytes={edgekv_result.get('edgekv_payload_bytes')}"
             )
     except Exception as e:
         print(f'[Step][End] Publish {html_source} HTML to Akamai EdgeKV: failed ({e})')
